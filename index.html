@@ -193,11 +193,11 @@ float caustic(vec2 p, float t) {
 }
 `;
 // Moving light patterns on everything under the water line.
-function addCaustics(mat) {
+function addCaustics(mat, strength = 1.1) {
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.uTime = timeU;
-    sh.vertexShader = 'varying vec3 vWPos;\n' + sh.vertexShader.replace('#include <begin_vertex>',
-      `#include <begin_vertex>
+    sh.vertexShader = 'varying vec3 vWPos;\n' + sh.vertexShader.replace('#include <skinning_vertex>',
+      `#include <skinning_vertex>
       vec4 cw = vec4(transformed, 1.0);
       #ifdef USE_INSTANCING
         cw = instanceMatrix * cw;
@@ -205,10 +205,10 @@ function addCaustics(mat) {
       vWPos = (modelMatrix * cw).xyz;`);
     sh.fragmentShader = 'uniform float uTime;\nvarying vec3 vWPos;\n' + CAUSTIC_GLSL + sh.fragmentShader.replace('#include <opaque_fragment>',
       `float uw = smoothstep(0.02, -0.3, vWPos.y);
-      outgoingLight += diffuseColor.rgb * caustic(vWPos.xz, uTime) * uw * 1.1;
+      outgoingLight += diffuseColor.rgb * caustic(vWPos.xz, uTime) * uw * ${strength.toFixed(2)};
       #include <opaque_fragment>`);
   };
-  mat.customProgramCacheKey = () => 'caustics';
+  mat.customProgramCacheKey = () => `caustics|${strength}`;
 }
 // Wind sway for grass, flowers and bamboo. `base` is the GLSL expression for the rooted height.
 function addWind(mat, { base, height, amp, freq }) {
@@ -630,95 +630,384 @@ const water = new THREE.Mesh(
 scene.add(water);
 
 // ---------- koi ----------
-const koiBody = (() => {
-  const pts = [];
-  const N = 26;
-  for (let i = 0; i <= N; i++) {
-    const t = i / N;
-    let r = 0.15 * Math.pow(Math.max(Math.sin(Math.PI * Math.pow(t, 0.72)), 0), 0.85);
-    if (i < N) r = Math.max(r, 0.025 * (1 - t));
-    pts.push(new THREE.Vector2(r, t - 0.5));
-  }
-  return new THREE.LatheGeometry(pts, 20).rotateX(Math.PI / 2).scale(0.75, 0.95, 1);
-})();
-const koiFins = (() => {
-  const tail = new THREE.Shape();
-  tail.moveTo(0, 0.03);
-  tail.quadraticCurveTo(0.16, 0.12, 0.44, 0.26);
-  tail.quadraticCurveTo(0.34, 0.09, 0.3, 0);
-  tail.quadraticCurveTo(0.34, -0.09, 0.44, -0.26);
-  tail.quadraticCurveTo(0.16, -0.12, 0, -0.03);
-  const tailG = new THREE.ShapeGeometry(tail, 10).rotateY(Math.PI / 2).translate(0, 0, -0.46);
-  const dorsal = new THREE.Shape();
-  dorsal.moveTo(-0.17, 0);
-  dorsal.lineTo(-0.14, 0.075);
-  dorsal.quadraticCurveTo(0.05, 0.1, 0.22, 0);
-  const dorsalG = new THREE.ShapeGeometry(dorsal, 8).rotateY(Math.PI / 2).translate(0, 0.115, 0);
-  const pect = new THREE.Shape();
-  pect.moveTo(0, 0);
-  pect.quadraticCurveTo(0.12, 0.02, 0.17, 0.1);
-  pect.quadraticCurveTo(0.08, 0.12, 0, 0.06);
-  const pectR = new THREE.ShapeGeometry(pect, 6).rotateX(-Math.PI / 2).rotateZ(-0.45).translate(0.07, -0.06, 0.2);
-  const pectL = pectR.clone().scale(-1, 1, 1);
-  const pelvR = new THREE.ShapeGeometry(pect, 6).scale(0.6, 0.6, 1).rotateX(-Math.PI / 2).rotateZ(-0.6).translate(0.05, -0.09, -0.08);
-  const pelvL = pelvR.clone().scale(-1, 1, 1);
-  return mergeGeometries([tailG, dorsalG, pectR, pectL, pelvR, pelvL]);
-})();
-const eyeGeo = new THREE.SphereGeometry(0.016, 10, 8);
-const eyeMat = new THREE.MeshStandardMaterial({ color: 0x0b0a08, roughness: 0.15, metalness: 0.3 });
-
-function koiBend(mat, u) {
-  mat.onBeforeCompile = (sh) => {
-    Object.assign(sh.uniforms, u);
-    sh.vertexShader = 'uniform float uPhase, uAmp, uCurve;\n' + sh.vertexShader.replace('#include <begin_vertex>',
-      `#include <begin_vertex>
-      float tw = smoothstep(0.35, -0.6, position.z) * (1.0 + max(-0.5 - position.z, 0.0) * 1.8);
-      transformed.x += sin(position.z * 5.5 + uPhase) * uAmp * tw - sin(uPhase) * uAmp * 0.12;
-      transformed.x += uCurve * (position.z - 0.2) * (position.z - 0.2);`);
+// Body plan of a mature koi in body lengths (snout = 0, tail root = 1): a blunt rounded snout,
+// head ending at the gill covers near 0.27, widest just behind them (~0.26), deepest under the
+// dorsal fin (~0.26), a thick caudal peduncle, and a moderately forked tail adding about a quarter.
+function hermite(xs, ys) {
+  const n = xs.length, m = xs.map((_, i) => {
+    const a = Math.max(0, i - 1), b = Math.min(n - 1, i + 1);
+    return (ys[b] - ys[a]) / (xs[b] - xs[a]);
+  });
+  return (x) => {
+    if (x <= xs[0]) return ys[0];
+    if (x >= xs[n - 1]) return ys[n - 1];
+    let i = 0;
+    while (x > xs[i + 1]) i++;
+    const h = xs[i + 1] - xs[i], t = (x - xs[i]) / h, t2 = t * t, t3 = t2 * t;
+    return (2 * t3 - 3 * t2 + 1) * ys[i] + (t3 - 2 * t2 + t) * h * m[i] + (3 * t2 - 2 * t3) * ys[i + 1] + (t3 - t2) * h * m[i + 1];
   };
-  mat.customProgramCacheKey = () => 'koi';
+}
+const KOI_S = [0.06, 0.12, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+const koiHalfW = hermite(KOI_S, [0.07, 0.092, 0.11, 0.123, 0.128, 0.124, 0.111, 0.092, 0.07, 0.049, 0.036]);
+const koiTop = hermite(KOI_S, [0.022, 0.052, 0.085, 0.114, 0.13, 0.131, 0.12, 0.099, 0.075, 0.055, 0.042]);
+const koiBot = hermite(KOI_S, [-0.05, -0.074, -0.096, -0.115, -0.125, -0.126, -0.116, -0.094, -0.07, -0.05, -0.04]);
+const SNOUT = 0.08, SNOUT_Y = -0.025; // the mouth sits low, the forehead slopes up to the back
+function koiSection(s) {
+  if (s >= SNOUT) return [koiHalfW(s), koiTop(s), koiBot(s)];
+  const k = Math.sqrt(Math.max(0, 1 - (1 - s / SNOUT) ** 2)); // elliptical cap: a blunt, rounded snout
+  return [koiHalfW(SNOUT) * k, SNOUT_Y + (koiTop(SNOUT) - SNOUT_Y) * k, SNOUT_Y + (koiBot(SNOUT) - SNOUT_Y) * k];
 }
 
-const KOI_GOLDS = [0xf4b41a, 0xf8c84c, 0xe99a12, 0xf2aa3a, 0xffd25c, 0xeba221, 0xf6b830];
-const fish = [];
-for (let i = 0; i < 7; i++) {
-  const u = { uPhase: { value: rng() * TAU }, uAmp: { value: 0.06 }, uCurve: { value: 0 } };
-  const base = new THREE.Color(KOI_GOLDS[i]), back = base.clone().lerp(new THREE.Color(0xc65d0c), 0.45);
-  const belly = new THREE.Color(0xfff1c6), patch = new THREE.Color(i % 3 === 0 ? 0xe0561a : 0xf08a1c);
-  const g = koiBody.clone(), p = g.attributes.position, col = new Float32Array(p.count * 3), c = new THREE.Color();
-  for (let k = 0; k < p.count; k++) {
-    const x = p.getX(k), y = p.getY(k), z = p.getZ(k), upv = y / 0.14;
-    c.copy(base);
-    if (upv > 0) c.lerp(back, Math.min(upv, 1) * 0.7); else c.lerp(belly, Math.min(-upv, 1) * 0.75);
-    const n = fbm(z * 7 + i * 13, (x + y) * 7 + i * 5);
-    if (upv > -0.3) c.lerp(patch, smoothstep(0.55, 0.68, n) * 0.8);
-    col.set([c.r, c.g, c.b], k * 3);
+// Spine bones, by distance from the snout. The last two sit inside the tail fin so it flexes.
+const BONE_S = [0.18, 0.32, 0.46, 0.6, 0.73, 0.86, 0.98, 1.1, 1.2];
+const TAIL_TIP = 1.27;
+const KOI_WAVE_K = TAU / 1.05; // body wave about one body length long
+function setSkin(geo) {
+  const p = geo.attributes.position, n = p.count, idx = new Uint16Array(n * 4), w = new Float32Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    const s = 0.5 - p.getZ(i);
+    let a = BONE_S.length - 1, b = a, t = 0;
+    if (s <= BONE_S[0]) { a = b = 0; }
+    else {
+      for (let j = 0; j < BONE_S.length - 1; j++) {
+        if (s < BONE_S[j + 1]) { a = j; b = j + 1; t = (s - BONE_S[j]) / (BONE_S[j + 1] - BONE_S[j]); break; }
+      }
+    }
+    idx.set([a, b, 0, 0], i * 4);
+    w.set([1 - t, t, 0, 0], i * 4);
   }
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(idx, 4));
+  geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(w, 4));
+  return geo;
+}
+function indexedGeometry(pos, uv, idx) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+// A fin as a fan of rays: fn(a, r) gives the point at ray a (0..1 across the fin) and r (0 base .. 1 tip).
+function finGeometry(na, nr, fn) {
+  const pos = [], uv = [], idx = [];
+  for (let i = 0; i <= na; i++) for (let j = 0; j <= nr; j++) { pos.push(...fn(i / na, j / nr)); uv.push(i / na, j / nr); }
+  for (let i = 0; i < na; i++) for (let j = 0; j < nr; j++) {
+    const p = i * (nr + 1) + j;
+    idx.push(p, p + nr + 1, p + 1, p + 1, p + nr + 1, p + nr + 2);
+  }
+  return indexedGeometry(pos, uv, idx);
+}
 
-  const bodyMat = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.45, roughness: 0.3, envMap: envTex, envMapIntensity: 0.9, emissive: 0x2a1200 });
-  const finMat = new THREE.MeshStandardMaterial({ color: base.clone().lerp(new THREE.Color(0xfff0c0), 0.3), metalness: 0.2, roughness: 0.4, transparent: true, opacity: 0.72, side: THREE.DoubleSide, depthWrite: false, emissive: 0x3a2000, envMap: envTex, envMapIntensity: 0.6 });
-  const depthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
-  [bodyMat, finMat, depthMat].forEach((m) => koiBend(m, u));
+const koiBodyGeo = (() => {
+  const NS = 56, NV = 28, pos = [0, SNOUT_Y, 0.5], uv = [0, 0.5], idx = [];
+  for (let j = 1; j <= NS; j++) {
+    const s = (j / NS) ** 1.4, [w, top, bot] = koiSection(s), yc = (top + bot) / 2, hh = (top - bot) / 2;
+    for (let k = 0; k <= NV; k++) {
+      const v = k / NV, a = -Math.PI / 2 + v * TAU, c = Math.cos(a), sn = Math.sin(a);
+      pos.push(w * Math.sign(c) * Math.abs(c) ** 0.85, yc + hh * Math.sign(sn) * Math.abs(sn) ** 0.9, 0.5 - s);
+      uv.push(s, v); // u runs snout to tail, v runs belly -> right flank -> back -> left flank -> belly
+    }
+  }
+  const ring = (j, k) => 1 + (j - 1) * (NV + 1) + k;
+  for (let k = 0; k < NV; k++) idx.push(0, ring(1, k), ring(1, k + 1));
+  for (let j = 1; j < NS; j++) for (let k = 0; k < NV; k++) {
+    const a = ring(j, k), b = ring(j, k + 1), c = ring(j + 1, k), d = ring(j + 1, k + 1);
+    idx.push(a, c, b, b, c, d);
+  }
+  const [, eTop, eBot] = koiSection(1), end = pos.length / 3;
+  pos.push(0, (eTop + eBot) / 2, -0.5);
+  uv.push(1, 0.5);
+  for (let k = 0; k < NV; k++) idx.push(end, ring(NS, k + 1), ring(NS, k));
+  return setSkin(indexedGeometry(pos, uv, idx));
+})();
 
-  const group = new THREE.Group();
-  group.rotation.order = 'YXZ';
-  const body = new THREE.Mesh(g, bodyMat);
-  body.castShadow = true;
-  body.customDepthMaterial = depthMat;
-  const fins = new THREE.Mesh(koiFins, finMat);
-  group.add(body, fins);
-  for (const sx of [-1, 1]) { const eye = new THREE.Mesh(eyeGeo, eyeMat); eye.position.set(sx * 0.036, 0.022, 0.37); group.add(eye); }
-  const scale = rand(0.85, 1.3);
-  group.scale.setScalar(scale);
-  const th = rng() * TAU, d = rand(0, 0.45) * pondR(th);
-  const f = {
-    group, u, scale, x: Math.cos(th) * d, z: Math.sin(th) * d, y: rand(-0.8, -0.35),
-    heading: rng() * TAU, turn: 0, turnTarget: 0, speed: 0.35, targetSpeed: rand(0.25, 0.55),
-    targetY: rand(-0.8, -0.35), depthTimer: rand(1, 6), kiss: false,
-  };
-  scene.add(group);
-  fish.push(f);
+const koiMedianFinGeo = (() => {
+  const [, pTop, pBot] = koiSection(0.985);
+  const caudal = finGeometry(18, 6, (a, r) => {
+    const q = Math.abs(2 * a - 1), ang = (2 * a - 1) * 0.68;
+    const len = 0.12 + 0.17 * q ** 1.6 - 0.05 * smoothstep(0.86, 1, q); // forked, with rounded lobes
+    return [0, pBot + (pTop - pBot) * a + Math.sin(ang) * len * r, -0.485 - Math.cos(ang) * len * r];
+  });
+  const dorsal = finGeometry(16, 5, (a, r) => {
+    const s = 0.38 + 0.37 * a, h = 0.035 + 0.085 * (1 - a) ** 1.6, lean = 0.5 + 0.4 * a;
+    return [0, koiTop(s) - 0.006 + Math.cos(lean) * h * r, 0.5 - s - Math.sin(lean) * h * r];
+  });
+  const anal = finGeometry(7, 4, (a, r) => {
+    const s = 0.72 + 0.1 * a, h = 0.07 * (1 - 0.55 * a), lean = 0.7;
+    return [0, koiBot(s) + 0.006 - Math.cos(lean) * h * r, 0.5 - s - Math.sin(lean) * h * r];
+  });
+  return setSkin(mergeGeometries([caudal, dorsal, anal]));
+})();
+// Paired fins in their own space: the root runs along z at x = 0, rays fan outwards (+x) and back.
+function pairedFinGeometry(len, sweep) {
+  return finGeometry(10, 5, (a, r) => {
+    const ang = sweep + 1.2 * a, L = len * (1 - 0.45 * a * a);
+    return [Math.cos(ang) * L * r, -0.25 * L * r * r, 0.014 - 0.03 * a - Math.sin(ang) * L * r];
+  });
+}
+const pectoralGeo = [pairedFinGeometry(0.2, 0.2), pairedFinGeometry(0.2, 0.2).scale(-1, 1, 1)];
+const pelvicGeo = [pairedFinGeometry(0.1, 0.45), pairedFinGeometry(0.1, 0.45).scale(-1, 1, 1)];
+
+// Barbels (two pairs at the mouth), eyes: in the space of the head bone.
+const HEAD_Z = 0.5 - BONE_S[0];
+const barbelGeo = (() => {
+  const tube = (pts) => new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts.map((p) => new THREE.Vector3(...p))), 8, 0.0032, 5);
+  const parts = [];
+  for (const sx of [-1, 1]) {
+    parts.push(tube([[0.016 * sx, -0.034, 0.488], [0.03 * sx, -0.054, 0.49], [0.044 * sx, -0.07, 0.476]]));
+    parts.push(tube([[0.03 * sx, -0.044, 0.466], [0.054 * sx, -0.062, 0.452], [0.07 * sx, -0.072, 0.424]]));
+  }
+  return mergeGeometries(parts).translate(0, 0, -HEAD_Z);
+})();
+const EYE_S = 0.1;
+const eyePos = (() => {
+  const [w, top, bot] = koiSection(EYE_S), a = 0.34;
+  return new THREE.Vector3(w * Math.cos(a) ** 0.85, (top + bot) / 2 + ((top - bot) / 2) * Math.sin(a) ** 0.9, 0.5 - EYE_S - HEAD_Z);
+})();
+const eyeGeo = new THREE.SphereGeometry(0.0145, 14, 10);
+const irisGeo = new THREE.SphereGeometry(0.0175, 14, 10);
+const pupilMat = new THREE.MeshStandardMaterial({ color: 0x080706, roughness: 0.08, metalness: 0.2, envMap: envTex });
+
+// Colour plans. All are metallic golden koi: Yamabuki (yellow-gold), Orenji (orange-gold),
+// a deeper Kin gold, and a gold koi with orange patches.
+const KOI_VARIANTS = [
+  { back: 0xdc9a18, side: 0xf6c935, belly: 0xfff2c4, head: 0xffe690, fin: 0xf6cf66 },
+  { back: 0xd8701a, side: 0xf49a32, belly: 0xffe0b4, head: 0xffc274, fin: 0xf6b064 },
+  { back: 0xc68a12, side: 0xeab42c, belly: 0xf8eab6, head: 0xf9d678, fin: 0xeec466 },
+  { back: 0xdc9a18, side: 0xf6c935, belly: 0xfff2c4, head: 0xffe690, fin: 0xf6cf66, patch: 0xe8641e },
+];
+const rgba = (hex, a) => `rgba(${(hex >> 16) & 255},${(hex >> 8) & 255},${hex & 255},${a})`;
+
+function koiTextures(v, seed) {
+  const W = 512, H = 256;
+  const color = document.createElement('canvas'), bump = document.createElement('canvas');
+  color.width = bump.width = W;
+  color.height = bump.height = H;
+  const g = color.getContext('2d'), b = bump.getContext('2d');
+  // Canvas x is distance from the snout; canvas y wraps the body: belly, flank, back, flank, belly.
+  const gr = g.createLinearGradient(0, 0, 0, H);
+  gr.addColorStop(0, rgba(v.belly, 1));
+  gr.addColorStop(0.17, rgba(v.side, 1));
+  gr.addColorStop(0.4, rgba(v.back, 1));
+  gr.addColorStop(0.5, rgba(v.back, 1));
+  gr.addColorStop(0.6, rgba(v.back, 1));
+  gr.addColorStop(0.83, rgba(v.side, 1));
+  gr.addColorStop(1, rgba(v.belly, 1));
+  g.fillStyle = gr;
+  g.fillRect(0, 0, W, H);
+  // A bright, scaleless head.
+  const hg = g.createLinearGradient(0, 0, 0.3 * W, 0);
+  hg.addColorStop(0, rgba(v.head, 0.9));
+  hg.addColorStop(0.8, rgba(v.head, 0.55));
+  hg.addColorStop(1, rgba(v.head, 0));
+  g.fillStyle = hg;
+  g.fillRect(0, H * 0.12, 0.3 * W, H * 0.76);
+  if (v.patch) {
+    const r = mulberry32(seed);
+    g.fillStyle = rgba(v.patch, 0.16);
+    for (let p = 0; p < 3; p++) {
+      const cx = W * (0.32 + 0.5 * r()), cy = H * (0.42 + 0.16 * r()), rx = W * (0.06 + 0.07 * r()), ry = H * (0.12 + 0.12 * r());
+      for (let k = 0; k < 40; k++) {
+        g.beginPath();
+        g.ellipse(cx + (r() - 0.5) * rx, cy + (r() - 0.5) * ry, rx * (0.4 + 0.5 * r()), ry * (0.4 + 0.5 * r()), 0, 0, TAU);
+        g.fill();
+      }
+    }
+  }
+  // Dark line along the spine.
+  const sg = g.createLinearGradient(0, H * 0.44, 0, H * 0.56);
+  sg.addColorStop(0, 'rgba(90,45,0,0)');
+  sg.addColorStop(0.5, 'rgba(110,55,0,0.16)');
+  sg.addColorStop(1, 'rgba(90,45,0,0)');
+  g.fillStyle = sg;
+  g.fillRect(0.25 * W, H * 0.44, 0.75 * W, H * 0.12);
+
+  b.fillStyle = 'rgb(160,160,160)';
+  b.fillRect(0, 0, W, H);
+  // Scales: each one a soft metallic glint with a faint rim towards the tail, every one a
+  // little brighter or duller than its neighbours, fading out on the belly.
+  const sx = 12, sy = 10, R = 6, sr = mulberry32(seed * 7 + 3);
+  for (let col = 0, x = W * 0.985; x > W * 0.27; col++, x -= sx) {
+    for (let y = col % 2 ? sy / 2 : 0; y < H + sy; y += sy) {
+      const vv = y / H, vis = smoothstep(0.06, 0.3, Math.min(vv, 1 - vv)) * smoothstep(0.27, 0.34, x / W);
+      const glint = g.createRadialGradient(x - R * 0.9, y, 0, x - R * 0.9, y, R * 1.1);
+      glint.addColorStop(0, `rgba(255,248,215,${(vis * (0.08 + 0.2 * sr())).toFixed(3)})`);
+      glint.addColorStop(1, 'rgba(255,248,215,0)');
+      g.fillStyle = glint;
+      g.fillRect(x - R * 2.1, y - R * 1.2, R * 2.4, R * 2.4);
+      g.lineWidth = 0.9;
+      g.strokeStyle = `rgba(120,64,0,${(0.12 * vis).toFixed(3)})`;
+      g.beginPath(); g.arc(x - R, y, R, -0.8, 0.8); g.stroke();
+      b.lineWidth = 1.2;
+      b.strokeStyle = `rgba(60,60,60,${(0.5 * vis).toFixed(3)})`;
+      b.beginPath(); b.arc(x - R, y, R, -0.8, 0.8); b.stroke();
+    }
+  }
+  // Gill covers on both flanks.
+  for (const cy of [0.25 * H, 0.75 * H]) {
+    g.lineWidth = 2.2;
+    g.strokeStyle = 'rgba(120,60,0,0.38)';
+    g.beginPath(); g.arc(0.27 * W - 34, cy, 34, -1.15, 1.15); g.stroke();
+    b.lineWidth = 3;
+    b.strokeStyle = 'rgba(30,30,30,0.9)';
+    b.beginPath(); b.arc(0.27 * W - 34, cy, 34, -1.15, 1.15); b.stroke();
+  }
+  const map = new THREE.CanvasTexture(color);
+  map.colorSpace = THREE.SRGBColorSpace;
+  map.anisotropy = 4;
+  return { map, bump: new THREE.CanvasTexture(bump) };
+}
+function finTexture(hex) {
+  const S = 128, c = document.createElement('canvas');
+  c.width = c.height = S;
+  const g = c.getContext('2d');
+  // uv.y = 0 (fin root) is the bottom of the canvas.
+  const gr = g.createLinearGradient(0, S, 0, 0);
+  gr.addColorStop(0, rgba(hex, 0.92));
+  gr.addColorStop(0.55, rgba(hex, 0.66));
+  gr.addColorStop(1, 'rgba(255,248,225,0.3)');
+  g.fillStyle = gr;
+  g.fillRect(0, 0, S, S);
+  const N = 14;
+  for (let i = 0; i < N; i++) {
+    const x = ((i + 0.5) / N) * S, rg = g.createLinearGradient(0, S, 0, 0);
+    rg.addColorStop(0, rgba(hex, 0.95));
+    rg.addColorStop(1, 'rgba(255,240,200,0.35)');
+    g.strokeStyle = rg;
+    g.lineWidth = 1.7;
+    g.beginPath(); g.moveTo(x, S); g.lineTo(x, 0); g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+const fish = [];
+function pickTarget(f) {
+  if (rng() < 0.35) {
+    const o = fish[(rng() * fish.length) | 0]; // drift after another koi, loosely
+    if (o && o !== f) { f.tx = o.x + rand(-1, 1); f.tz = o.z + rand(-1, 1); }
+  } else {
+    const th = rng() * TAU, d = Math.sqrt(rng()) * 0.5 * pondR(th);
+    f.tx = Math.cos(th) * d; f.tz = Math.sin(th) * d;
+  }
+  const s = pondS(f.tx, f.tz);
+  if (s > 0.5) { f.tx *= 0.5 / s; f.tz *= 0.5 / s; }
+}
+function setState(f, state) {
+  f.state = state;
+  f.kissed = false;
+  if (state === 'swim') {
+    f.stateT = rand(4, 10);
+    f.cruise = rand(0.22, 0.42) * f.scale;
+    f.ty = rand(-0.95, -0.3);
+    pickTarget(f);
+  } else if (state === 'glide') {
+    f.stateT = rand(1.5, 3.5);
+  } else if (state === 'hover') {
+    f.stateT = rand(3, 7);
+  } else if (state === 'kiss') {
+    f.stateT = 9;
+    f.cruise = 0.16 * f.scale;
+    f.ty = -0.17 * f.scale;
+    f.tx = f.x + Math.sin(f.heading) * 1.5; f.tz = f.z + Math.cos(f.heading) * 1.5;
+  }
+}
+
+{
+  const materials = KOI_VARIANTS.map((v, i) => {
+    const { map, bump } = koiTextures(v, 101 + i);
+    const body = new THREE.MeshPhysicalMaterial({
+      map, bumpMap: bump, bumpScale: 0.5, metalness: 0.55, roughness: 0.32,
+      clearcoat: 0.5, clearcoatRoughness: 0.3, envMap: envTex, envMapIntensity: 1.0,
+    });
+    addCaustics(body, 0.7);
+    const fin = new THREE.MeshStandardMaterial({
+      map: finTexture(v.fin), transparent: true, side: THREE.DoubleSide, depthWrite: false,
+      roughness: 0.45, metalness: 0.15, envMap: envTex, envMapIntensity: 0.5,
+    });
+    const iris = new THREE.MeshStandardMaterial({ color: v.head, metalness: 0.7, roughness: 0.3, envMap: envTex });
+    return { body, fin, iris };
+  });
+  const plan = [0, 1, 3, 2, 0, 3, 1];
+  plan.forEach((vi, i) => {
+    const mat = materials[vi];
+    const group = new THREE.Group();
+    group.rotation.order = 'YXZ';
+    const bones = BONE_S.map(() => new THREE.Bone());
+    bones[0].position.z = HEAD_Z;
+    for (let k = 1; k < bones.length; k++) {
+      bones[k].position.z = -(BONE_S[k] - BONE_S[k - 1]);
+      bones[k - 1].add(bones[k]);
+    }
+    const body = new THREE.SkinnedMesh(koiBodyGeo, mat.body);
+    const fins = new THREE.SkinnedMesh(koiMedianFinGeo, mat.fin);
+    body.add(bones[0]);
+    group.add(body, fins);
+    group.updateMatrixWorld(true);
+    const skeleton = new THREE.Skeleton(bones);
+    body.bind(skeleton);
+    fins.bind(skeleton);
+    body.castShadow = true;
+    body.frustumCulled = fins.frustumCulled = false;
+
+    // Head details ride on the head bone.
+    bones[0].add(new THREE.Mesh(barbelGeo, mat.body));
+    for (const sx of [-1, 1]) {
+      const p = eyePos.clone().setX(eyePos.x * sx);
+      const iris = new THREE.Mesh(irisGeo, mat.iris);
+      iris.position.copy(p).setX(p.x * 0.93);
+      iris.scale.set(0.55, 1, 1);
+      const eye = new THREE.Mesh(eyeGeo, pupilMat);
+      eye.position.copy(p);
+      eye.scale.set(0.6, 1, 1);
+      bones[0].add(iris, eye);
+    }
+    // Paired fins on pivots so they can fold, spread and scull.
+    const pivot = (bone, s, side, geo, inset, drop) => {
+      const [w, , bot] = koiSection(s);
+      const o = new THREE.Object3D();
+      o.rotation.order = 'YXZ';
+      o.position.set(side * w * inset, bot * drop, -(s - BONE_S[bone]));
+      o.add(new THREE.Mesh(geo, mat.fin));
+      bones[bone].add(o);
+      return o;
+    };
+    const scale = rand(0.8, 1.25);
+    group.scale.setScalar(scale);
+    const th = rng() * TAU, d = rand(0, 0.45) * pondR(th);
+    const f = {
+      group, bones, scale, seed: rng() * 100,
+      pecR: pivot(0, 0.29, 1, pectoralGeo[0], 0.72, 0.62), pecL: pivot(0, 0.29, -1, pectoralGeo[1], 0.72, 0.62),
+      pelR: pivot(2, 0.5, 1, pelvicGeo[0], 0.42, 0.88), pelL: pivot(2, 0.5, -1, pelvicGeo[1], 0.42, 0.88),
+      x: Math.cos(th) * d, z: Math.sin(th) * d, y: rand(-0.8, -0.35), heading: rng() * TAU,
+      speed: 0.2 * scale, turnRate: 0, bend: 0, amp: 0.05, freq: 0.6, phase: rng() * TAU, pecPhase: rng() * TAU,
+      pitch: 0, tx: 0, tz: 0, ty: -0.5, cruise: 0.3, state: 'swim', stateT: 0, kissed: false,
+    };
+    scene.add(group);
+    fish.push(f);
+    setState(f, 'swim');
+    f.stateT = rand(1, 8);
+  });
+}
+
+// Lateral offset of the spine at distance s from the snout: a travelling wave whose amplitude
+// grows quadratically towards the tail, plus a curve into the current turn.
+const spineX = new Array(BONE_S.length + 1);
+function poseKoi(f) {
+  const nb = BONE_S.length, sAt = (i) => (i < nb ? BONE_S[i] : TAIL_TIP);
+  for (let i = 0; i <= nb; i++) {
+    const s = sAt(i), q = s / TAIL_TIP;
+    const env = 0.12 - 0.28 * q + 1.16 * q * q;
+    spineX[i] = f.amp * env * Math.sin(KOI_WAVE_K * s - f.phase) + 0.5 * f.bend * (s - 0.5) ** 2;
+  }
+  let prev = 0;
+  for (let i = 0; i < nb; i++) {
+    const phi = -Math.atan((spineX[i + 1] - spineX[i]) / (sAt(i + 1) - sAt(i)));
+    f.bones[i].rotation.y = phi - prev;
+    prev = phi;
+  }
 }
 
 // ---------- feeding ----------
@@ -738,74 +1027,117 @@ function feed(x, z) {
 }
 function removePellet(i) { scene.remove(pellets[i].m); pellets.splice(i, 1); }
 
-let nextKiss = 4;
-const fwd = new THREE.Vector3();
-function updateFish(dt, t) {
+let nextKiss = 5;
+function updateKoi(dt, t) {
   if (t > nextKiss) {
     const f = fish[(rng() * fish.length) | 0];
-    f.kiss = true; f.targetY = -0.08; f.depthTimer = 6;
-    nextKiss = t + rand(4, 9);
+    if (f.state !== 'feed') setState(f, 'kiss');
+    nextKiss = t + rand(5, 10);
   }
   for (const f of fish) {
-    if (rng() < dt * 0.45) f.turnTarget = (rng() - 0.5) * 1.5;
-    f.turn += (f.turnTarget - f.turn) * Math.min(1, dt * 1.5);
-    let h = f.heading + f.turn * dt;
-
-    const s = pondS(f.x, f.z);
-    if (s > 0.42) h = lerpAngle(h, Math.atan2(-f.x, -f.z), Math.min(1, smoothstep(0.42, 0.62, s) * dt * 3));
-
-    // Head for the nearest food pellet.
+    f.stateT -= dt;
     let food = null, best = 1e9;
-    for (const pl of pellets) { const dd = Math.hypot(pl.x - f.x, pl.z - f.z); if (dd < best) { best = dd; food = pl; } }
-    const hungry = food && best < 5;
-    if (hungry) {
-      h = lerpAngle(h, Math.atan2(food.x - f.x, food.z - f.z), Math.min(1, dt * 2.8));
-      f.targetY = best < 1.3 ? -0.09 : -0.3;
-      f.targetSpeed = best < 0.6 ? 0.35 : 0.85;
+    for (const pl of pellets) {
+      const d = Math.hypot(pl.x - f.x, pl.z - f.z);
+      if (d < best) { best = d; food = pl; }
     }
+    if (food && best < 6) f.state = 'feed';
+    else if (f.state === 'feed') setState(f, 'glide');
+    if (f.stateT < 0 && f.state !== 'feed') {
+      if (f.state === 'swim') { const r = rng(); setState(f, r < 0.55 ? 'glide' : r < 0.72 ? 'hover' : 'swim'); }
+      else setState(f, 'swim');
+    }
+
+    // Where to head, and how hard to swim.
+    const st = f.state;
+    let desired = f.heading, thrust = 0;
+    if (st === 'swim' || st === 'kiss') {
+      if (Math.hypot(f.tx - f.x, f.tz - f.z) < 0.7) pickTarget(f);
+      desired = Math.atan2(f.tx - f.x, f.tz - f.z) + Math.sin(t * 0.37 + f.seed) * 0.35;
+      thrust = f.cruise;
+    } else if (st === 'feed') {
+      desired = Math.atan2(food.x - f.x, food.z - f.z);
+      thrust = (best < 0.5 ? 0.16 : 0.55) * f.scale;
+      f.ty = best < 1.4 ? -0.17 * f.scale : -0.35;
+    } else if (st === 'hover') {
+      desired = f.heading + Math.sin(t * 0.21 + f.seed) * 0.5;
+      thrust = 0.03 * f.scale;
+    }
+    // Keep clear of the banks: look ahead and swing towards open water.
+    const look = 0.9 + f.speed * 2;
+    const sa = pondS(f.x + Math.sin(f.heading) * look, f.z + Math.cos(f.heading) * look);
+    if (sa > 0.55) desired = lerpAngle(desired, Math.atan2(-f.x, -f.z), smoothstep(0.55, 0.78, sa));
+    let px = 0, pz = 0;
     for (const o of fish) {
       if (o === f) continue;
-      const dx = f.x - o.x, dz = f.z - o.z, dd = Math.hypot(dx, dz);
-      if (dd < 0.75 && Math.abs(f.y - o.y) < 0.3) h = lerpAngle(h, Math.atan2(dx, dz), Math.min(1, dt * (1.2 - dd)));
+      const dx = f.x - o.x, dz = f.z - o.z, dd = Math.hypot(dx, dz), r = 0.55 * (f.scale + o.scale);
+      if (dd < r && Math.abs(f.y - o.y) < 0.35) { px += (dx / dd) * (1 - dd / r); pz += (dz / dd) * (1 - dd / r); }
     }
-    const turnRate = angleTo(f.heading, h) / Math.max(dt, 1e-4);
-    f.heading = h;
-    f.speed += (f.targetSpeed - f.speed) * Math.min(1, dt * 1.2);
-    f.x += Math.sin(h) * f.speed * dt;
-    f.z += Math.cos(h) * f.speed * dt;
+    if (px || pz) desired = lerpAngle(desired, Math.atan2(px, pz), clamp(Math.hypot(px, pz), 0, 0.7));
 
-    if (!hungry && !f.kiss) {
-      f.depthTimer -= dt;
-      if (f.depthTimer < 0) {
-        f.targetY = rand(-0.85, -0.3);
-        f.targetSpeed = rand(0.22, 0.55);
-        f.depthTimer = rand(4, 10);
-      }
-    }
-    const floorY = terrainH(f.x, f.z) + 0.25 * f.scale;
-    const ty = Math.min(-0.08, Math.max(f.targetY, floorY));
-    const vy = (ty - f.y) * 0.8;
+    // Slow koi turn gently on their pectoral fins; swimming koi turn with body and tail.
+    const sb = f.speed / f.scale;
+    const maxTurn = 0.25 + 0.9 * clamp(sb, 0, 0.6);
+    const want = clamp(angleTo(f.heading, desired) * 1.2, -maxTurn, maxTurn);
+    f.turnRate += (want - f.turnRate) * Math.min(1, dt * 1.8);
+    f.heading += f.turnRate * dt;
+
+    // Beating the tail speeds the fish up; without it the fish coasts and slowly loses speed.
+    f.speed += (thrust - f.speed) * Math.min(1, dt * (thrust > f.speed ? 0.9 : 0.3));
+    f.x += Math.sin(f.heading) * f.speed * dt;
+    f.z += Math.cos(f.heading) * f.speed * dt;
+    const s = pondS(f.x, f.z);
+    if (s > 0.68) { f.x *= 0.68 / s; f.z *= 0.68 / s; }
+
+    const floorY = terrainH(f.x, f.z) + 0.15 * f.scale;
+    const ty = Math.min(Math.max(f.ty, floorY), -0.15 * f.scale);
+    const vy = clamp((ty - f.y) * 0.7, -0.14, 0.14);
     f.y += vy * dt;
 
-    fwd.set(Math.sin(h), 0, Math.cos(h));
-    const hx = f.x + fwd.x * 0.42 * f.scale, hz = f.z + fwd.z * 0.42 * f.scale;
-    if (f.kiss && f.y > -0.14) {
+    // Tail beat: about 0.2 body lengths peak to peak at cruise, faster beats for more speed.
+    const swimming = thrust > 0.08 * f.scale;
+    const ampT = (swimming ? 0.05 + 0.07 * clamp(thrust / f.scale / 0.55, 0, 1) : 0.014) + Math.min(Math.abs(f.turnRate), 1.5) * 0.012;
+    const freqT = swimming ? 0.4 + thrust / f.scale / 0.65 : 0.32;
+    f.amp += (ampT - f.amp) * Math.min(1, dt * 1.5);
+    f.freq += (freqT - f.freq) * Math.min(1, dt * 1.5);
+    f.phase += TAU * f.freq * dt;
+    // Swimming koi curve into a turn; slow ones pivot on their fins with the body nearly straight.
+    const bendT = clamp((f.turnRate / Math.max(f.speed, 0.15 * f.scale)) * f.scale * 0.6, -0.9, 0.9) * smoothstep(0.05, 0.25, sb);
+    f.bend += (bendT - f.bend) * Math.min(1, dt * 3);
+    poseKoi(f);
+
+    // Pectoral fins: folded back while cruising, spread and sculling when slow, the inside fin
+    // opening to brake in a turn.
+    const slow = 1 - smoothstep(0.12, 0.45, sb);
+    f.pecPhase += TAU * (0.5 + 0.8 * slow) * dt;
+    const scull = 0.08 + 0.32 * slow, fold = 0.25 + 0.95 * (1 - slow), tk = clamp(f.turnRate, -1, 1);
+    const droop = -0.3 + Math.sin(f.pecPhase) * scull, feather = Math.cos(f.pecPhase) * scull * 0.8;
+    f.pecR.rotation.set(feather, fold - 0.45 * Math.max(tk, 0), droop);
+    f.pecL.rotation.set(feather, -(fold - 0.45 * Math.max(-tk, 0)), -droop);
+    const pel = 0.9 + Math.sin(f.pecPhase + 1) * 0.08 * slow;
+    f.pelR.rotation.set(0, pel, -0.45);
+    f.pelL.rotation.set(0, -pel, 0.45);
+
+    // Rising to the surface: tilt the snout up, kiss the water, then sink away.
+    const nearTop = (st === 'kiss' || st === 'feed') && f.y > -0.25 * f.scale;
+    const pitchT = clamp(-Math.atan2(vy, Math.max(f.speed, 0.1)) * 0.8, -0.45, 0.45) - (nearTop ? 0.3 : 0);
+    f.pitch += (pitchT - f.pitch) * Math.min(1, dt * 2);
+    const hx = f.x + Math.sin(f.heading) * 0.5 * f.scale, hz = f.z + Math.cos(f.heading) * 0.5 * f.scale;
+    if (st === 'kiss' && !f.kissed && Math.abs(f.y - ty) < 0.03) {
       addRipple(hx, hz, 0.55);
-      f.kiss = false; f.targetY = rand(-0.7, -0.4);
+      f.kissed = true;
+      f.stateT = 1.2;
     }
     for (let i = pellets.length - 1; i >= 0; i--) {
       const pl = pellets[i];
-      if (f.y > -0.2 && Math.hypot(pl.x - hx, pl.z - hz) < 0.22 * f.scale + 0.05) {
+      if (f.y > ty - 0.06 && Math.hypot(pl.x - hx, pl.z - hz) < 0.1 * f.scale + 0.06) {
         addRipple(pl.x, pl.z, 0.75);
         removePellet(i);
       }
     }
 
     f.group.position.set(f.x, f.y, f.z);
-    f.group.rotation.set(-Math.atan2(vy, Math.max(f.speed, 0.1)) * 0.7, h, clamp(-turnRate * 0.12, -0.3, 0.3));
-    f.u.uPhase.value += dt * (3 + f.speed * 9);
-    f.u.uAmp.value = 0.035 + f.speed * 0.05 + Math.min(Math.abs(turnRate), 2) * 0.012;
-    f.u.uCurve.value += (clamp(turnRate * 0.25, -0.35, 0.35) - f.u.uCurve.value) * Math.min(1, dt * 4);
+    f.group.rotation.set(f.pitch, f.heading, clamp(-f.turnRate * 0.06, -0.1, 0.1));
   }
 }
 
@@ -854,7 +1186,7 @@ const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = (timeU.value += dt);
-  updateFish(dt, t);
+  updateKoi(dt, t);
   for (const pd of pads) {
     pd.g.position.y = 0.012 + Math.sin(t * 0.9 + pd.ph) * 0.006;
     pd.g.rotation.y += pd.spin * dt;
