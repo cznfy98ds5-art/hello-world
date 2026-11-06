@@ -660,9 +660,10 @@ const water = new THREE.Mesh(
 scene.add(water);
 
 // ---------- koi ----------
-// Body plan of a mature koi in body lengths (snout = 0, tail root = 1): a blunt rounded snout,
-// head ending at the gill covers near 0.27, widest just behind them (~0.26), deepest under the
-// dorsal fin (~0.26), a thick caudal peduncle, and a moderately forked tail adding about a quarter.
+// Body plan of a mature koi in body lengths (snout = 0, tail root = 1): head length 0.27 to the
+// gill cover's edge, with a carp's head proportions (snout about 40% of the head, eye about 15%,
+// about 40% across the top between the eyes); the body widens behind the head to ~0.25 and is
+// deepest under the dorsal fin (~0.26), with a thick caudal peduncle and a forked tail.
 function hermite(xs, ys) {
   const n = xs.length, m = xs.map((_, i) => {
     const a = Math.max(0, i - 1), b = Math.min(n - 1, i + 1);
@@ -678,9 +679,9 @@ function hermite(xs, ys) {
   };
 }
 const KOI_S = [0, 0.03, 0.06, 0.12, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-const koiHalfW = hermite(KOI_S, [0.05, 0.068, 0.08, 0.097, 0.11, 0.123, 0.128, 0.124, 0.111, 0.092, 0.07, 0.049, 0.036]);
-const koiTop = hermite(KOI_S, [-0.004, 0.018, 0.036, 0.062, 0.085, 0.114, 0.13, 0.131, 0.12, 0.099, 0.075, 0.055, 0.042]);
-const koiBot = hermite(KOI_S, [-0.04, -0.054, -0.064, -0.08, -0.096, -0.115, -0.125, -0.126, -0.116, -0.094, -0.07, -0.05, -0.04]);
+const koiHalfW = hermite(KOI_S, [0.036, 0.054, 0.064, 0.078, 0.089, 0.108, 0.126, 0.124, 0.111, 0.092, 0.07, 0.049, 0.036]);
+const koiTop = hermite(KOI_S, [-0.006, 0.02, 0.042, 0.07, 0.093, 0.116, 0.13, 0.131, 0.12, 0.099, 0.075, 0.055, 0.042]);
+const koiBot = hermite(KOI_S, [-0.046, -0.058, -0.068, -0.083, -0.098, -0.115, -0.125, -0.126, -0.116, -0.094, -0.07, -0.05, -0.04]);
 const SNOUT = 0.08, SNOUT_Y = -0.025; // the mouth sits low, the forehead slopes up to the back
 function koiSection(s) {
   if (s >= SNOUT) return [koiHalfW(s), koiTop(s), koiBot(s)];
@@ -695,9 +696,18 @@ function spineY(s) { const [, t, b] = koiSection(s); return b + (t - b) * 0.58; 
 // s = 0.27 at mid-flank and curves forward above and below. Angles round the body: -π/2 belly,
 // 0 mid-flank, π/2 back; `am` is the angle on one side, `side` +1 right, -1 left.
 const MOUTH_Y = -0.031;
-const OP_A0 = -1.25, OP_A1 = 1.05;
-function opercleEdge(am) { const q = clamp(am / (Math.PI / 2), -1, 1); return 0.272 - 0.055 * (1 - Math.cos(q * 1.35)); }
-function opercleFront(am) { return 0.185 + 0.012 * am; }
+// The gill cover is laid out on a chart of the head: s from the snout and t, the height on the
+// flank (-1 belly, 0 mid-flank, 1 back). Its free edge is a half circle bulging back from its
+// hinge line at s = OP_S, from high on the flank round to under the throat.
+const OP_S = 0.18, OP_RS = 0.09, OP_T = -0.16, OP_RT = 0.78;
+const amFromT = (t) => Math.asin(clamp(Math.sign(t) * Math.abs(t) ** (1 / 0.9), -1, 1));
+const tFromAm = (am) => Math.sign(am) * Math.abs(Math.sin(am)) ** 0.9;
+// [s, am] at radius r (0 hinge centre, 1 free edge) and angle th (-π/2 bottom, π/2 top).
+function opercleAt(r, th) { return [OP_S + r * OP_RS * Math.cos(th), amFromT(OP_T + r * OP_RT * Math.sin(th))]; }
+// How far behind the hinge (dx) and how far out towards the free edge (r) a skin point lies.
+function opercleCoords(s, am) { const dx = (s - OP_S) / OP_RS, dy = (tFromAm(am) - OP_T) / OP_RT; return [dx, Math.hypot(dx, dy)]; }
+// Where the skin comes out from under the gill cover along the row at angle am.
+function opercleEdgeS(am) { const dy = (tFromAm(am) - OP_T) / OP_RT; return OP_S + OP_RS * Math.sqrt(Math.max(0, 1 - dy * dy)); }
 const sideAngle = (am, side) => (side > 0 ? am : Math.PI - am);
 function sectionPoint(w, top, bot, a) {
   const c = Math.cos(a), sn = Math.sin(a), yc = (top + bot) / 2, hh = (top - bot) / 2;
@@ -711,10 +721,8 @@ function skinPoint(s, a, lift = 0) {
 }
 // Depth of the gill chamber hollowed out under the gill cover.
 function gillRecess(s, a) {
-  const am = a > Math.PI / 2 ? Math.PI - a : a;
-  if (am < OP_A0 || am > OP_A1) return 0;
-  const along = smoothstep(opercleFront(am) - 0.002, opercleFront(am) + 0.03, s) * (1 - smoothstep(opercleEdge(am) - 0.014, opercleEdge(am) - 0.003, s));
-  return 0.024 * along * smoothstep(OP_A0, OP_A0 + 0.2, am) * (1 - smoothstep(OP_A1 - 0.2, OP_A1, am));
+  const [dx, r] = opercleCoords(s, a > Math.PI / 2 ? Math.PI - a : a);
+  return dx <= 0 || r >= 0.97 ? 0 : 0.024 * smoothstep(0, 0.3, dx) * (1 - smoothstep(0.86, 0.97, r));
 }
 // Lips and mouth as rings round the mouth opening, from deep inside the mouth out to the outer
 // lip: [half width, half height, z from the snout, how far it opens, how far it protrudes, tint].
@@ -734,9 +742,9 @@ function lipPoint(ring, a) {
   return { p: [x, y, z], gape: [0, sn < 0 ? sn * open : sn * open * 0.35, 0], prot: [-x * 0.25 * fwd, (-0.012 + 0.004 * sn) * fwd, 0.035 * fwd] };
 }
 // The snout, from the outer lip (q = 0) back to the head section at s = SNOUT_B (q = 1). Near
-// the lip the skin turns outwards faster than it runs back, which rounds the snout off, and it
-// meets the head without a crease.
-const SNOUT_B = 0.13;
+// the lip the skin turns outwards faster than it runs back, which gives the blunt, rounded snout,
+// and it meets the head without a crease.
+const SNOUT_B = 0.07;
 function snoutPoint(q, a) {
   const lip = lipPoint(LIP_RINGS[LIP_RINGS.length - 1], a), th = (q * Math.PI) / 2;
   const s = SNOUT_B * (1 - Math.cos(th)), bl = Math.sin(th), fall = (1 - bl) ** 2;
@@ -934,15 +942,15 @@ function barbelParts(side) {
 
 // Eyes: golden iris round a black pupil under a wet, glossy cornea, set in the side of the head
 // facing out and a little forward.
-const EYE_S = 0.105, EYE_A = 0.38;
+const EYE_S = 0.125, EYE_A = 0.45; // high on the head: about 40% of the head length across the top between the eyes
 function eyePlacement(side) {
   const { p, n } = surfaceFrame(EYE_S, sideAngle(EYE_A, side), side);
   n.z += 0.12;
   n.normalize();
-  p.addScaledVector(n, -0.004);
+  p.addScaledVector(n, -0.006);
   return { n, p: p.setZ(p.z - HEAD_Z), q: new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1, 0, 0), n) };
 }
-const eyeGeo = new THREE.SphereGeometry(0.0165, 24, 16).rotateZ(-Math.PI / 2); // pole (pupil) along +x
+const eyeGeo = new THREE.SphereGeometry(0.02, 24, 16).rotateZ(-Math.PI / 2); // pole (pupil) along +x
 const eyeMat = (() => {
   const W = 128, H = 64, c = document.createElement('canvas');
   c.width = W; c.height = H;
@@ -969,53 +977,55 @@ const eyeMat = (() => {
 // Nostrils: two openings in front of each eye with a small flap of skin between them.
 const nostrilMat = new THREE.MeshStandardMaterial({ color: 0x140904, roughness: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
 function nostrilParts(side) {
-  const frame = (q, am, lift) => {
-    const a = sideAngle(am, side), p = new THREE.Vector3(...snoutPoint(q, a).p);
-    const du = new THREE.Vector3(...snoutPoint(q, a + 0.01).p).sub(p), dq = new THREE.Vector3(...snoutPoint(q + 0.01, a).p).sub(p);
-    const n = new THREE.Vector3().crossVectors(du, dq).normalize();
-    if (n.x * side < 0) n.negate();
-    return { p: p.addScaledVector(n, lift).setZ(p.z - HEAD_Z), q: new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n) };
+  const frame = (s, am, lift) => {
+    const { p, n } = surfaceFrame(s, sideAngle(am, side), side);
+    p.addScaledVector(n, lift);
+    return { p: p.setZ(p.z - HEAD_Z), q: new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n) };
   };
   return [
-    { geo: new THREE.CircleGeometry(0.0034, 14).scale(1, 0.8, 1), ...frame(0.58, 0.55, 0.0003) },
-    { geo: new THREE.CircleGeometry(0.003, 14).scale(1, 0.8, 1), ...frame(0.66, 0.55, 0.0003) },
-    { geo: new THREE.CircleGeometry(0.0034, 10, 0, Math.PI), ...frame(0.62, 0.55, 0.0012), flap: true },
+    { geo: new THREE.CircleGeometry(0.0034, 14).scale(1, 0.8, 1), ...frame(0.084, 0.64, 0.0003) },
+    { geo: new THREE.CircleGeometry(0.003, 14).scale(1, 0.8, 1), ...frame(0.097, 0.64, 0.0003) },
+    { geo: new THREE.CircleGeometry(0.0034, 10, 0, Math.PI), ...frame(0.0905, 0.64, 0.0012), flap: true },
   ];
 }
 
-// Gill cover: a thin bony flap following the skin from its hinge to its free edge, where it
-// lifts slightly and its rim folds under. It turns about the hinge to open.
+// Gill cover: a thin bony flap over the half circle of the chart. It lifts off the skin in
+// proportion to the distance behind its hinge, so the free edge stands proud at the back and
+// sinks flush with the skin at its top and bottom ends, with no corners; the rim folds under the
+// edge. It turns about the hinge line to open.
 function opercleGeometry(side) {
-  const NA = 26, NR = 14, rows = NR + 2, pos = [], uv = [], idx = [];
-  for (let i = 0; i <= NA; i++) {
-    const am = OP_A0 + (OP_A1 - OP_A0) * (i / NA), a = sideAngle(am, side), f = opercleFront(am), e = opercleEdge(am);
+  const NT = 32, NR = 14, rows = NR + 2, pos = [], uv = [], idx = [];
+  for (let i = 0; i <= NT; i++) {
+    const th = -Math.PI / 2 + Math.PI * (i / NT), c = Math.cos(th);
     for (let j = 0; j <= rows; j++) {
-      const r = Math.min(j / NR, 1);
-      const s = j <= NR ? f + (e - f) * r : e - 0.005 * (j - NR);
-      const lift = j <= NR ? 0.0004 + 0.0036 * r * r : 0.004 - 0.005 * (j - NR);
+      const r = j <= NR ? j / NR : 1 - 0.04 * (j - NR);
+      const lift = j <= NR ? 0.0004 + 0.0045 * (r * c) ** 2 : (0.0049 - 0.0055 * (j - NR)) * c * c;
+      const [s, am] = opercleAt(r, th), a = sideAngle(am, side);
       pos.push(...skinPoint(s, a, lift));
       uv.push(s, (a + Math.PI / 2) / TAU); // the same texture as the skin beneath
     }
   }
-  for (let i = 0; i < NA; i++) for (let j = 0; j < rows; j++) {
+  for (let i = 0; i < NT; i++) for (let j = 0; j < rows; j++) {
     const p = i * (rows + 1) + j, q = p + rows + 1;
     if (side > 0) idx.push(p, p + 1, q, q, p + 1, q + 1);
     else idx.push(p, q, p + 1, q, q + 1, p + 1);
   }
-  const h0 = new THREE.Vector3(...skinPoint(opercleFront(OP_A0), sideAngle(OP_A0, side), 0.0004));
-  const h1 = new THREE.Vector3(...skinPoint(opercleFront(OP_A1), sideAngle(OP_A1, side), 0.0004));
+  const [h0, h1] = [-1, 1].map((k) => {
+    const [s, am] = opercleAt(1, (k * Math.PI) / 2);
+    return new THREE.Vector3(...skinPoint(s, sideAngle(am, side), 0.0004));
+  });
   const mid = h0.clone().add(h1).multiplyScalar(0.5);
   const geo = indexedGeometry(pos, uv, idx).translate(-mid.x, -mid.y, -mid.z);
   return { geo, pivot: mid.setZ(mid.z - HEAD_Z), axis: h1.sub(h0).normalize() };
 }
-// Gills: four arches in the chamber under each gill cover, each a comb of red filaments
-// sweeping back. They show when the cover lifts.
+// Gills: four arches in the chamber under each gill cover, following its curve, each a comb of
+// red filaments reaching towards the free edge. They show when the cover lifts.
 function gillGeometry(side) {
   const parts = [];
   for (let k = 0; k < 4; k++) {
     parts.push(finGeometry(30, 2, (t, r) => {
-      const am = OP_A0 + 0.2 + (OP_A1 - OP_A0 - 0.4) * t;
-      return skinPoint(opercleEdge(am) - 0.02 - 0.011 * k + 0.013 * r, sideAngle(am, side), -0.018 + 0.007 * r);
+      const [s, am] = opercleAt(0.84 - 0.1 * k + 0.1 * r, -1.3 + 2.6 * t);
+      return skinPoint(s, sideAngle(am, side), -0.018 + 0.007 * r);
     }, [side, 0, 0], 0.0012));
   }
   return mergeGeometries(parts).translate(0, 0, -HEAD_Z);
@@ -1050,14 +1060,14 @@ const koiBoneGeo = (() => {
     for (const sx of [-1, 1]) {
       // gill cover: the bony rim of the opercle, just under the skin
       const rim = [];
-      for (let k = 0; k <= 10; k++) {
-        const am = OP_A0 + (OP_A1 - OP_A0) * (k / 10);
-        rim.push(new THREE.Vector3(...skinPoint(opercleEdge(am) - 0.006, sideAngle(am, sx), -0.008)));
+      for (let k = 0; k <= 12; k++) {
+        const [s, am] = opercleAt(0.93, -Math.PI / 2 + Math.PI * (k / 12));
+        rim.push(new THREE.Vector3(...skinPoint(s, sideAngle(am, sx), -0.008)));
       }
-      parts.push(tubeGeo(rim, 0.0026, 14));
+      parts.push(tubeGeo(rim, 0.0026, 16));
       parts.push(tubeGeo([KP(0, MOUTH_Y - 0.018, 0.012), KP(sx * 0.04, MOUTH_Y - 0.024, 0.05), KP(sx * 0.07, -0.065, 0.13)], 0.0042));
       const ep = eyePlacement(sx);
-      parts.push(new THREE.TorusGeometry(0.02, 0.0025, 6, 18).applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), ep.n)).translate(ep.p.x, ep.p.y, ep.p.z + HEAD_Z));
+      parts.push(new THREE.TorusGeometry(0.025, 0.0025, 6, 18).applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), ep.n)).translate(ep.p.x, ep.p.y, ep.p.z + HEAD_Z));
       parts.push(tubeGeo([KP(sx * w3 * 0.3, t3 * 0.72, 0.25), KP(sx * w3 * 0.86, (t3 + b3) / 2, 0.262), KP(sx * w3 * 0.45, b3 * 0.8, 0.272)], 0.0035, 8));
     }
   }
@@ -1119,7 +1129,7 @@ const koiScales = (() => {
   const r = mulberry32(77), dx = ((S1 - S0) / COLS) * W, dy = H / ROWS, list = [];
   for (let j = -1; j <= ROWS; j++) for (let c = -4; c <= COLS; c++) {
     const x = S0 * W + (c + 0.5 + (j & 1) * 0.5) * dx;
-    if (x < 0.22 * W || x > S1 * W + dx * 0.5) continue;
+    if (x < 0.2 * W || x > S1 * W + dx * 0.5) continue;
     list.push({ x, y: j * dy, tilt: (r() - 0.5) * 0.8, flake: r() });
   }
   list.sort((p, q) => q.x - p.x); // tail first, so scales nearer the head lie on top
@@ -1127,7 +1137,7 @@ const koiScales = (() => {
   for (const sc of list) {
     const v = 1 - sc.y / H, belly = Math.min(v, 1 - v);
     // Scales start right behind the gill cover's free edge and flatten towards the belly midline.
-    const a = -Math.PI / 2 + v * TAU, start = opercleEdge(a > Math.PI / 2 ? Math.PI - a : a) * W;
+    const a = -Math.PI / 2 + v * TAU, start = Math.max(opercleEdgeS(a > Math.PI / 2 ? Math.PI - a : a), 0.215) * W;
     const vis = smoothstep(0.02, 0.2, belly) * smoothstep(start, start + dx * 1.2, sc.x);
     const ax = Math.cos(sc.tilt) * rx, ay = Math.sin(sc.tilt) * rx;
     const hgrad = hg.createLinearGradient(sc.x - ax, sc.y - ay, sc.x + ax, sc.y + ay);
@@ -1151,33 +1161,69 @@ const koiScales = (() => {
   for (const ly of [0.25 * H, 0.75 * H]) {
     for (let c = 0; c < COLS; c++) {
       const x = S0 * W + (c + 0.5) * dx + dx * 0.3;
-      sg.fillStyle = grey(72); sg.beginPath(); sg.ellipse(x, ly, 2.6, 1.6, 0, 0, TAU); sg.fill();
-      hg.fillStyle = grey(96); hg.beginPath(); hg.ellipse(x, ly, 2.6, 1.6, 0, 0, TAU); hg.fill();
+      sg.fillStyle = grey(78); sg.beginPath(); sg.ellipse(x, ly, 2.1, 1.3, 0, 0, TAU); sg.fill();
+      hg.fillStyle = grey(100); hg.beginPath(); hg.ellipse(x, ly, 2.1, 1.3, 0, 0, TAU); hg.fill();
     }
   }
-  // Head: the groove of the preopercle in front of the gill cover, and fine ridges radiating
-  // across the gill cover from its hinge.
-  const texXY = (s, am, side) => [s * W, (1 - (sideAngle(am, side) + Math.PI / 2) / TAU) * H];
+  // Head anatomy on the skin, laid out on the head chart (s along the head, t up the flank):
+  // the rim of the eye socket, the chain of infraorbital bones under the eye, the crescent of the
+  // preopercle in front of the gill cover, faint ridges on the gill cover, the pores of the
+  // head's sensory canals (supraorbital, infraorbital, preoperculo-mandibular, supratemporal)
+  // and a fine grain over the skin.
+  const texST = (s, t, side) => [s * W, (1 - (sideAngle(amFromT(clamp(t, -0.999, 0.999)), side) + Math.PI / 2) / TAU) * H];
+  const arcST = (cs, ct, rs, rt, a0, a1, n = 24) => Array.from({ length: n + 1 }, (_, k) => {
+    const an = a0 + (a1 - a0) * (k / n);
+    return [cs + rs * Math.cos(an), ct + rt * Math.sin(an)];
+  });
   const line = (g, pts, width, style) => {
     g.lineWidth = width; g.strokeStyle = style; g.beginPath();
     pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
     g.stroke();
   };
+  const pore = ([x, y]) => {
+    sg.fillStyle = grey(78); sg.beginPath(); sg.ellipse(x, y, 1.9, 1.5, 0, 0, TAU); sg.fill();
+    hg.fillStyle = grey(92); hg.beginPath(); hg.ellipse(x, y, 1.9, 1.5, 0, 0, TAU); hg.fill();
+  };
+  const ET = tFromAm(EYE_A), pr = mulberry32(11);
   for (const side of [1, -1]) {
-    const pre = [];
-    for (let k = 0; k <= 20; k++) {
-      const am = OP_A0 + 0.05 + (OP_A1 - OP_A0 - 0.1) * (k / 20);
-      pre.push(texXY(opercleFront(am) - 0.012 + 0.006 * Math.cos(am * 1.2), am, side));
+    const P = (pts) => pts.map(([ps, pt]) => texST(ps, pt, side));
+    // eye socket rim
+    line(hg, P(arcST(EYE_S, ET, 0.026, 0.27, 0, TAU, 40)), 3, grey(152));
+    line(sg, P(arcST(EYE_S, ET, 0.026, 0.27, 0, TAU, 40)), 2, grey(142));
+    // infraorbital bones: four plates arching under and behind the eye
+    for (let k = 0; k < 4; k++) {
+      const a0 = Math.PI * (0.82 + 0.33 * k), a1 = a0 + Math.PI * 0.3;
+      line(hg, P(arcST(EYE_S + 0.004, ET - 0.03, 0.044, 0.44, a0, a1, 10)), 2.2, grey(110));
+      line(sg, P(arcST(EYE_S + 0.004, ET - 0.03, 0.044, 0.44, a0, a1, 10)), 1.4, grey(112));
+      const [c0, c1] = [arcST(EYE_S + 0.004, ET - 0.03, 0.03, 0.3, a0, a0, 1)[0], arcST(EYE_S + 0.004, ET - 0.03, 0.044, 0.44, a0, a0, 1)[0]];
+      line(hg, P([c0, c1]), 1.6, grey(114));
     }
-    line(hg, pre, 2.4, grey(108));
-    line(sg, pre, 1.6, grey(104));
-    const hingeAm = 0.55, hs = opercleFront(hingeAm) + 0.006;
+    // preopercle: a crescent of bone curving round in front of the gill cover
+    const pre = P(arcST(OP_S + 0.01, OP_T, 0.036, OP_RT * 0.97, Math.PI / 2, Math.PI * 1.5, 30));
+    line(hg, pre, 2.6, grey(106));
+    line(sg, pre, 1.8, grey(100));
+    line(hg, P(arcST(OP_S + 0.01, OP_T, 0.026, OP_RT * 0.9, Math.PI * 0.55, Math.PI * 1.45, 30)), 1.4, grey(140));
+    // gill cover: faint ridges fanning out from its upper hinge
+    const [hs, ht] = [OP_S + 0.012, OP_T + OP_RT * 0.45];
     for (let k = 0; k <= 8; k++) {
-      const am = OP_A0 + 0.2 + (OP_A1 - OP_A0 - 0.4) * (k / 8) + (r() - 0.5) * 0.12, reach = 0.72 + 0.22 * r(), pts = [];
-      for (let m = 0; m <= 8; m++) { const t = m / 8; pts.push(texXY(hs + (opercleEdge(am) - 0.012 - hs) * t * reach, hingeAm + (am - hingeAm) * t, side)); }
-      line(hg, pts, 1.1, grey(136));
-      line(sg, pts, 1, grey(134));
+      const th = -1.2 + 2.0 * (k / 8) + (pr() - 0.5) * 0.12, reach = 0.7 + 0.2 * pr();
+      const [es, eam] = opercleAt(0.9 * reach, th), et = tFromAm(eam), pts = [];
+      for (let m = 0; m <= 8; m++) { const f = m / 8; pts.push([hs + (es - hs) * f, ht + (et - ht) * f]); }
+      line(hg, P(pts), 1, grey(135));
+      line(sg, P(pts), 0.9, grey(133));
     }
+    // sensory canal pores
+    for (let k = 0; k < 8; k++) pore(texST(0.055 + 0.02 * k, ET + 0.3 + 0.1 * (k / 7), side));
+    for (const [cs, ct] of arcST(EYE_S + 0.004, ET - 0.03, 0.054, 0.54, Math.PI * 0.9, Math.PI * 2.1, 9)) pore(texST(cs, ct, side));
+    for (const [cs, ct] of arcST(OP_S + 0.01, OP_T, 0.028, OP_RT * 0.88, Math.PI * 0.6, Math.PI * 1.45, 7)) pore(texST(cs, ct, side));
+    for (let k = 0; k < 5; k++) pore(texST(0.15 - 0.025 * k, -0.86 + 0.02 * k, side));
+    for (let k = 0; k < 3; k++) pore(texST(0.205, 0.84 + 0.06 * k, side));
+  }
+  // fine grain over the scaleless skin of the head
+  for (let k = 0; k < 2500; k++) {
+    const x = pr() * 0.25 * W, y = pr() * H, d = (pr() - 0.5) * 2;
+    hg.fillStyle = `rgba(${d > 0 ? 255 : 0},${d > 0 ? 255 : 0},${d > 0 ? 255 : 0},${(0.02 + 0.025 * Math.abs(d)).toFixed(3)})`;
+    hg.beginPath(); hg.arc(x, y, 0.7 + pr() * 0.6, 0, TAU); hg.fill();
   }
   // Height -> tangent-space normals. Canvas y runs down while texture v runs up, and v wraps
   // round the body.
@@ -1196,7 +1242,26 @@ const koiScales = (() => {
   nctx.putImageData(img, 0, 0);
   const normalMap = new THREE.CanvasTexture(nc);
   normalMap.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  return { shade, normalMap };
+  // Surface finish: red = clearcoat, green = roughness. The scales are glossy under the slime
+  // layer; the bony, scaleless skin of the head is a little duller and uneven.
+  const sc = document.createElement('canvas');
+  sc.width = W; sc.height = H;
+  const fg = sc.getContext('2d');
+  fg.fillStyle = 'rgb(255,82,0)';
+  fg.fillRect(0, 0, W, H);
+  for (let y = 0; y < H; y++) {
+    const a = -Math.PI / 2 + (1 - (y + 0.5) / H) * TAU, start = Math.max(opercleEdgeS(a > Math.PI / 2 ? Math.PI - a : a), 0.215) * W;
+    const gr = fg.createLinearGradient(start - 14, 0, start + 6, 0);
+    gr.addColorStop(0, 'rgb(175,100,0)');
+    gr.addColorStop(1, 'rgba(175,100,0,0)');
+    fg.fillStyle = gr;
+    fg.fillRect(0, y, start + 6, 1);
+  }
+  for (let k = 0; k < 2500; k++) {
+    fg.fillStyle = `rgba(${(140 + 60 * pr()) | 0},${(85 + 40 * pr()) | 0},0,0.4)`;
+    fg.beginPath(); fg.arc(pr() * 0.24 * W, pr() * H, 1 + pr() * 2, 0, TAU); fg.fill();
+  }
+  return { shade, normalMap, surface: new THREE.CanvasTexture(sc) };
 })();
 
 function koiColorTexture(v, seed) {
@@ -1215,8 +1280,8 @@ function koiColorTexture(v, seed) {
   g.fillRect(0, 0, W, H);
   // A bright head without scales.
   const hg = g.createLinearGradient(0, 0, 0.3 * W, 0);
-  hg.addColorStop(0, rgba(v.head, 0.9));
-  hg.addColorStop(0.8, rgba(v.head, 0.55));
+  hg.addColorStop(0, rgba(v.head, 0.6));
+  hg.addColorStop(0.8, rgba(v.head, 0.35));
   hg.addColorStop(1, rgba(v.head, 0));
   g.fillStyle = hg;
   g.fillRect(0, H * 0.12, 0.3 * W, H * 0.76);
@@ -1310,7 +1375,8 @@ function setState(f, state) {
     // Metallic scales under a smooth clearcoat: the slime layer every fish carries.
     const body = new THREE.MeshPhysicalMaterial({
       map: koiColorTexture(v, 101 + i), normalMap: koiScales.normalMap, normalScale: new THREE.Vector2(0.9, 0.9), vertexColors: true,
-      metalness: 0.55, roughness: 0.3, clearcoat: 0.6, clearcoatRoughness: 0.15, envMap: envTex, envMapIntensity: 1.0,
+      roughnessMap: koiScales.surface, clearcoatMap: koiScales.surface,
+      metalness: 0.55, roughness: 1, clearcoat: 0.6, clearcoatRoughness: 0.15, envMap: envTex, envMapIntensity: 1.0,
     });
     addCaustics(body, 0.7);
     const opercle = body.clone();
