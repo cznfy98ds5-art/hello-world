@@ -14,6 +14,10 @@
     --ink-soft: rgba(247, 242, 226, 0.86);
     --glow: rgba(10, 34, 24, 0.6);
     --ground: #a9c7c2;
+    --chip: rgba(14, 38, 28, 0.5);
+    --chip-edge: rgba(247, 242, 226, 0.4);
+    --chip-on: rgba(247, 242, 226, 0.9);
+    --chip-on-ink: #1c3a2d;
     --font-title: "Ma Shan Zheng", "STKaiti", "KaiTi", "Kaiti SC", serif;
     --font-ui: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
     color-scheme: dark;
@@ -49,6 +53,24 @@
     font-family: var(--font-ui); color: var(--ink); background: #27443a; text-align: center;
   }
   #err[hidden] { display: none; }
+  #xray {
+    position: fixed;
+    right: calc(16px + env(safe-area-inset-right, 0px));
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    padding: 0.6rem 1.1rem;
+    font-family: var(--font-ui);
+    font-size: 0.85rem;
+    letter-spacing: 0.08em;
+    color: var(--ink);
+    background: var(--chip);
+    border: 1px solid var(--chip-edge);
+    border-radius: 999px;
+    cursor: pointer;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+  }
+  #xray[aria-pressed="true"] { background: var(--chip-on); color: var(--chip-on-ink); }
+  #xray:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 </style>
 </head>
 <body>
@@ -57,6 +79,7 @@
   <h1>竹林锦鲤池</h1>
   <p>拖动旋转 · 双指缩放 · 轻点水面投喂锦鲤</p>
 </div>
+<button id="xray" type="button" aria-pressed="false">透视鱼骨</button>
 <div id="err" hidden>你的浏览器不支持 WebGL，无法显示这个池塘。</div>
 
 <script type="importmap">
@@ -657,9 +680,18 @@ function koiSection(s) {
   const k = Math.sqrt(Math.max(0, 1 - (1 - s / SNOUT) ** 2)); // elliptical cap: a blunt, rounded snout
   return [koiHalfW(SNOUT) * k, SNOUT_Y + (koiTop(SNOUT) - SNOUT_Y) * k, SNOUT_Y + (koiBot(SNOUT) - SNOUT_Y) * k];
 }
+// Height of the vertebral column inside the body.
+function spineY(s) { const [, t, b] = koiSection(s); return b + (t - b) * 0.58; }
 
-// Spine bones, by distance from the snout. The last two sit inside the tail fin so it flexes.
-const BONE_S = [0.18, 0.32, 0.46, 0.6, 0.73, 0.86, 0.98, 1.1, 1.2];
+// Skeleton. The skull is rigid back to the first vertebra behind the gill covers (s = 0.27).
+// Nineteen spine joints follow at 0.04 spacing, each standing for two of a carp's ~36 vertebrae,
+// then two joints in the tail fin rays. Joints along the rib cage barely bend; the bend allowed
+// per joint grows towards the tail, the way a carp's spine is built.
+const BONE_S = [];
+for (let k = 0; k <= 18; k++) BONE_S.push(+(0.27 + 0.04 * k).toFixed(2));
+BONE_S.push(1.08, 1.17);
+const JOINT_LIMIT = BONE_S.map((s, i) => (i === 0 ? 0.12 : s > 1 ? 0.2 : 0.016 + 0.085 * smoothstep(0.4, 0.95, s)));
+function boneAt(s) { let i = 0; while (i + 1 < BONE_S.length && BONE_S[i + 1] <= s) i++; return i; }
 const TAIL_TIP = 1.27;
 const KOI_WAVE_K = TAU / 1.05; // body wave about one body length long
 function setSkin(geo) {
@@ -688,19 +720,27 @@ function indexedGeometry(pos, uv, idx) {
   g.computeVertexNormals();
   return g;
 }
-// A fin as a fan of rays: fn(a, r) gives the point at ray a (0..1 across the fin) and r (0 base .. 1 tip).
-function finGeometry(na, nr, fn) {
-  const pos = [], uv = [], idx = [];
-  for (let i = 0; i <= na; i++) for (let j = 0; j <= nr; j++) { pos.push(...fn(i / na, j / nr)); uv.push(i / na, j / nr); }
+// A fin is a fan of bony rays with membrane stretched between them. fn(a, r) gives the point at
+// a (0..1 across the fin) and r (0 root .. 1 tip); the membrane between rays is pleated along
+// `fold`, so the rays stand out as ridges. Texture u counts rays, so one texture tile is one ray.
+function finGeometry(rays, nr, fn, fold, depth) {
+  const pos = [], uv = [], idx = [], na = rays * 2;
+  for (let i = 0; i <= na; i++) for (let j = 0; j <= nr; j++) {
+    const a = i / na, r = j / nr, p = fn(a, r), d = i % 2 ? depth * Math.sin(Math.PI * Math.min(1, r * 1.3)) : 0;
+    pos.push(p[0] + fold[0] * d, p[1] + fold[1] * d, p[2] + fold[2] * d);
+    uv.push(a * rays, r);
+  }
   for (let i = 0; i < na; i++) for (let j = 0; j < nr; j++) {
     const p = i * (nr + 1) + j;
     idx.push(p, p + nr + 1, p + 1, p + 1, p + nr + 1, p + nr + 2);
   }
   return indexedGeometry(pos, uv, idx);
 }
+const tubeGeo = (pts, r, seg = 6) => new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), seg, r, 5);
+const KP = (x, y, s) => new THREE.Vector3(x, y, 0.5 - s); // a point in koi space, by distance from the snout
 
 const koiBodyGeo = (() => {
-  const NS = 56, NV = 28, pos = [0, SNOUT_Y, 0.5], uv = [0, 0.5], idx = [];
+  const NS = 64, NV = 32, pos = [0, SNOUT_Y, 0.5], uv = [0, 0.5], idx = [];
   for (let j = 1; j <= NS; j++) {
     const s = (j / NS) ** 1.4, [w, top, bot] = koiSection(s), yc = (top + bot) / 2, hh = (top - bot) / 2;
     for (let k = 0; k <= NV; k++) {
@@ -722,41 +762,47 @@ const koiBodyGeo = (() => {
   return setSkin(indexedGeometry(pos, uv, idx));
 })();
 
+// Median fins with a carp's ray counts: caudal 19 principal rays, dorsal 3 spines + ~18 soft
+// rays, anal 3 + 5. The dorsal and anal fins open with a stout, stiff spine.
 const koiMedianFinGeo = (() => {
   const [, pTop, pBot] = koiSection(0.985);
-  const caudal = finGeometry(18, 6, (a, r) => {
+  const caudal = finGeometry(19, 6, (a, r) => {
     const q = Math.abs(2 * a - 1), ang = (2 * a - 1) * 0.68;
     const len = 0.12 + 0.17 * q ** 1.6 - 0.05 * smoothstep(0.86, 1, q); // forked, with rounded lobes
     return [0, pBot + (pTop - pBot) * a + Math.sin(ang) * len * r, -0.485 - Math.cos(ang) * len * r];
-  });
-  const dorsal = finGeometry(16, 5, (a, r) => {
+  }, [1, 0, 0], 0.003);
+  const dorsalFn = (a, r) => {
     const s = 0.38 + 0.37 * a, h = 0.035 + 0.085 * (1 - a) ** 1.6, lean = 0.5 + 0.4 * a;
     return [0, koiTop(s) - 0.006 + Math.cos(lean) * h * r, 0.5 - s - Math.sin(lean) * h * r];
-  });
-  const anal = finGeometry(7, 4, (a, r) => {
+  };
+  const analFn = (a, r) => {
     const s = 0.72 + 0.1 * a, h = 0.07 * (1 - 0.55 * a), lean = 0.7;
     return [0, koiBot(s) + 0.006 - Math.cos(lean) * h * r, 0.5 - s - Math.sin(lean) * h * r];
-  });
-  return setSkin(mergeGeometries([caudal, dorsal, anal]));
+  };
+  const spine = (fn, r) => tubeGeo([0, 0.33, 0.66, 0.97].map((t) => new THREE.Vector3(...fn(0, t))), r, 6);
+  return setSkin(mergeGeometries([
+    caudal,
+    finGeometry(20, 5, dorsalFn, [1, 0, 0], 0.0025), spine(dorsalFn, 0.0032),
+    finGeometry(8, 4, analFn, [1, 0, 0], 0.002), spine(analFn, 0.0026),
+  ]));
 })();
 // Paired fins in their own space: the root runs along z at x = 0, rays fan outwards (+x) and back.
-function pairedFinGeometry(len, sweep) {
-  return finGeometry(10, 5, (a, r) => {
+function pairedFinGeometry(len, sweep, rays) {
+  return finGeometry(rays, 5, (a, r) => {
     const ang = sweep + 1.2 * a, L = len * (1 - 0.45 * a * a);
     return [Math.cos(ang) * L * r, -0.25 * L * r * r, 0.014 - 0.03 * a - Math.sin(ang) * L * r];
-  });
+  }, [0, 1, 0], len * 0.022);
 }
-const pectoralGeo = [pairedFinGeometry(0.2, 0.2), pairedFinGeometry(0.2, 0.2).scale(-1, 1, 1)];
-const pelvicGeo = [pairedFinGeometry(0.1, 0.45), pairedFinGeometry(0.1, 0.45).scale(-1, 1, 1)];
+const pectoralGeo = [pairedFinGeometry(0.2, 0.2, 16), pairedFinGeometry(0.2, 0.2, 16).scale(-1, 1, 1)];
+const pelvicGeo = [pairedFinGeometry(0.1, 0.45, 9), pairedFinGeometry(0.1, 0.45, 9).scale(-1, 1, 1)];
 
-// Barbels (two pairs at the mouth), eyes: in the space of the head bone.
+// Barbels (two pairs at the mouth) and eyes, in the space of the skull bone.
 const HEAD_Z = 0.5 - BONE_S[0];
 const barbelGeo = (() => {
-  const tube = (pts) => new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts.map((p) => new THREE.Vector3(...p))), 8, 0.0032, 5);
   const parts = [];
   for (const sx of [-1, 1]) {
-    parts.push(tube([[0.016 * sx, -0.034, 0.488], [0.03 * sx, -0.054, 0.49], [0.044 * sx, -0.07, 0.476]]));
-    parts.push(tube([[0.03 * sx, -0.044, 0.466], [0.054 * sx, -0.062, 0.452], [0.07 * sx, -0.072, 0.424]]));
+    parts.push(tubeGeo([[0.016 * sx, -0.034, 0.488], [0.03 * sx, -0.054, 0.49], [0.044 * sx, -0.07, 0.476]].map((p) => new THREE.Vector3(...p)), 0.0032, 8));
+    parts.push(tubeGeo([[0.03 * sx, -0.044, 0.466], [0.054 * sx, -0.062, 0.452], [0.07 * sx, -0.072, 0.424]].map((p) => new THREE.Vector3(...p)), 0.0032, 8));
   }
   return mergeGeometries(parts).translate(0, 0, -HEAD_Z);
 })();
@@ -769,6 +815,59 @@ const eyeGeo = new THREE.SphereGeometry(0.0145, 14, 10);
 const irisGeo = new THREE.SphereGeometry(0.0175, 14, 10);
 const pupilMat = new THREE.MeshStandardMaterial({ color: 0x080706, roughness: 0.08, metalness: 0.2, envMap: envTex });
 
+// The bones themselves, skinned to the same skeleton so they bend with the body. They sit
+// inside the opaque body and show when the body is made see-through.
+const koiBoneGeo = (() => {
+  const parts = [];
+  // Skull: braincase, gill-cover plates, lower jaw, eye sockets, and the shoulder girdle.
+  {
+    const [w, t, b] = koiSection(0.15);
+    parts.push(new THREE.SphereGeometry(1, 16, 12).scale(w * 0.34, (t - b) * 0.17, 0.085).translate(0, spineY(0.15) + 0.006, 0.5 - 0.16));
+    const [w3, t3, b3] = koiSection(0.26);
+    for (const sx of [-1, 1]) {
+      // gill cover: the bony rim of the opercle, just under the skin
+      const rim = [];
+      for (let k = 0; k <= 8; k++) {
+        const a = -1.1 + 2.2 * (k / 8), s = 0.255 - 0.06 * (1 - Math.cos(a)), [ws, ts, bs] = koiSection(s);
+        rim.push(KP(sx * ws * 0.9, (ts + bs) / 2 + ((ts - bs) / 2) * 0.82 * Math.sin(a), s));
+      }
+      parts.push(tubeGeo(rim, 0.0026, 12));
+      parts.push(tubeGeo([KP(0, SNOUT_Y - 0.016, 0.012), KP(sx * 0.045, SNOUT_Y - 0.03, 0.05), KP(sx * 0.072, -0.065, 0.13)], 0.0042));
+      parts.push(new THREE.TorusGeometry(0.02, 0.0025, 6, 18).rotateY(Math.PI / 2).translate(sx * eyePos.x * 0.92, eyePos.y, 0.5 - EYE_S));
+      parts.push(tubeGeo([KP(sx * w3 * 0.3, t3 * 0.72, 0.25), KP(sx * w3 * 0.86, (t3 + b3) / 2, 0.262), KP(sx * w3 * 0.45, b3 * 0.8, 0.272)], 0.0035, 8));
+    }
+  }
+  // Vertebral column: 36 vertebrae. Each carries a neural spine above; the 16 in front carry a
+  // pair of ribs around the body cavity, the ones behind a haemal spine below. Fine
+  // intermuscular bones (the carp's notorious small bones) angle back into the muscle.
+  const NV = 36, S0 = 0.27, S1 = 0.98, len = (S1 - S0) / NV;
+  for (let k = 0; k < NV; k++) {
+    const s = S0 + (k + 0.5) * len, [w, t, b] = koiSection(s), ys = spineY(s);
+    const rr = 0.0105 - 0.005 * (k / NV);
+    parts.push(new THREE.CylinderGeometry(rr, rr, len * 0.82, 10).rotateX(Math.PI / 2).translate(0, ys, 0.5 - s));
+    parts.push(tubeGeo([KP(0, ys + rr, s), KP(0, (ys + t) / 2 + 0.008, s + 0.018), KP(0, t - 0.014, s + 0.045)], 0.0017, 4));
+    if (k < 16) {
+      for (const sx of [-1, 1]) {
+        parts.push(tubeGeo([KP(0, ys, s), KP(sx * w * 0.55, ys - 0.004, s + 0.01), KP(sx * w * 0.82, (ys + b) / 2, s + 0.03), KP(sx * w * 0.5, b + 0.024, s + 0.05)], 0.0016, 8));
+      }
+    } else {
+      parts.push(tubeGeo([KP(0, ys - rr, s), KP(0, (ys + b) / 2 - 0.006, s + 0.018), KP(0, b + 0.014, s + 0.045)], 0.0017, 4));
+    }
+    if (k > 1 && k < 33) {
+      for (const sx of [-1, 1]) {
+        parts.push(tubeGeo([KP(sx * 0.004, ys + 0.01, s), KP(sx * w * 0.36, ys + (t - ys) * 0.42, s + 0.04)], 0.0008, 2));
+      }
+    }
+  }
+  // Fin supports inside the body (pterygiophores) under the dorsal and anal fins.
+  for (let s = 0.39; s < 0.75; s += 0.0205) parts.push(tubeGeo([KP(0, koiTop(s) - 0.008, s), KP(0, spineY(s) + 0.034, s + 0.006)], 0.0015, 2));
+  for (let s = 0.725; s < 0.82; s += 0.02) parts.push(tubeGeo([KP(0, koiBot(s) + 0.008, s), KP(0, spineY(s) - 0.03, s + 0.006)], 0.0015, 2));
+  // Hypural plate: the fan of bone the tail rays grow from.
+  { const [, t, b] = koiSection(0.975); parts.push(new THREE.SphereGeometry(1, 12, 10).scale(0.0045, (t - b) * 0.4, 0.022).translate(0, spineY(0.975), 0.5 - 0.975)); }
+  return setSkin(mergeGeometries(parts));
+})();
+const koiBoneMat = new THREE.MeshStandardMaterial({ color: 0xf2e8d2, roughness: 0.5, emissive: 0x2b2519 });
+
 // Colour plans. All are metallic golden koi: Yamabuki (yellow-gold), Orenji (orange-gold),
 // a deeper Kin gold, and a gold koi with orange patches.
 const KOI_VARIANTS = [
@@ -778,25 +877,106 @@ const KOI_VARIANTS = [
   { back: 0xdc9a18, side: 0xf6c935, belly: 0xfff2c4, head: 0xffe690, fin: 0xf6cf66, patch: 0xe8641e },
 ];
 const rgba = (hex, a) => `rgba(${(hex >> 16) & 255},${(hex >> 8) & 255},${hex & 255},${a})`;
+const grey = (k) => { const v = clamp(Math.round(k), 0, 255); return `rgb(${v},${v},${v})`; };
 
-function koiTextures(v, seed) {
-  const W = 512, H = 256;
-  const color = document.createElement('canvas'), bump = document.createElement('canvas');
-  color.width = bump.width = W;
-  color.height = bump.height = H;
-  const g = color.getContext('2d'), b = bump.getContext('2d');
+// Scales, shared by every koi. A carp has about 36 scales along the lateral line and about 12
+// rows on each side; neighbouring rows are offset by half a scale, so the rows also run
+// obliquely. Scales overlap like roof tiles: each one's front is buried under the scale ahead and
+// only its rear edge is free and raised. Two layers come out of the layout: a height map (turned
+// into a normal map, so every scale catches the light on its own) and a shading layer.
+const KOI_TEX_W = 1024, KOI_TEX_H = 512;
+const koiScales = (() => {
+  const W = KOI_TEX_W, H = KOI_TEX_H, COLS = 36, ROWS = 24, S0 = 0.27, S1 = 0.995;
+  const shade = document.createElement('canvas'), height = document.createElement('canvas');
+  shade.width = height.width = W;
+  shade.height = height.height = H;
+  const sg = shade.getContext('2d'), hg = height.getContext('2d');
+  for (const g of [sg, hg]) { g.fillStyle = grey(128); g.fillRect(0, 0, W, H); }
+  const r = mulberry32(77), dx = ((S1 - S0) / COLS) * W, dy = H / ROWS, list = [];
+  for (let j = -1; j <= ROWS; j++) for (let c = -1; c <= COLS; c++) {
+    const x = S0 * W + (c + 0.5 + (j & 1) * 0.5) * dx;
+    if (x < S0 * W || x > S1 * W + dx * 0.5) continue;
+    list.push({ x, y: j * dy, tilt: (r() - 0.5) * 0.8, flake: r() });
+  }
+  list.sort((p, q) => q.x - p.x); // tail first, so scales nearer the head lie on top
+  const rx = dx * 0.95, ry = dy * 0.68;
+  for (const sc of list) {
+    const v = 1 - sc.y / H, belly = Math.min(v, 1 - v);
+    // Scales flatten out towards the belly midline and right behind the gill cover.
+    const vis = smoothstep(0.02, 0.2, belly) * smoothstep(S0 * W, S0 * W + dx * 1.2, sc.x);
+    const ax = Math.cos(sc.tilt) * rx, ay = Math.sin(sc.tilt) * rx;
+    const hgrad = hg.createLinearGradient(sc.x - ax, sc.y - ay, sc.x + ax, sc.y + ay);
+    hgrad.addColorStop(0, grey(128 - 45 * vis));
+    hgrad.addColorStop(0.84, grey(128 + 55 * vis));
+    hgrad.addColorStop(1, grey(128 + 28 * vis));
+    hg.fillStyle = hgrad;
+    hg.beginPath(); hg.ellipse(sc.x, sc.y, rx, ry, 0, 0, TAU); hg.fill();
+    // Shading: every scale a slightly different metallic flake, a bright band just inside its
+    // free edge and a fine dark rim where it lies over the next scale.
+    sg.fillStyle = grey(128 + (sc.flake - 0.5) * 46 * vis);
+    sg.beginPath(); sg.ellipse(sc.x, sc.y, rx, ry, 0, 0, TAU); sg.fill();
+    sg.lineWidth = 2.4;
+    sg.strokeStyle = grey(128 + 42 * vis);
+    sg.beginPath(); sg.ellipse(sc.x - 2.5, sc.y, rx - 2.5, ry - 2, 0, -1.15, 1.15); sg.stroke();
+    sg.lineWidth = 1.4;
+    sg.strokeStyle = grey(128 - 48 * vis);
+    sg.beginPath(); sg.ellipse(sc.x, sc.y, rx, ry, 0, -1.25, 1.25); sg.stroke();
+  }
+  // Lateral line along the middle of each flank: a pore in every scale of that row.
+  for (const ly of [0.25 * H, 0.75 * H]) {
+    for (let c = 0; c < COLS; c++) {
+      const x = S0 * W + (c + 0.5) * dx + dx * 0.3;
+      sg.fillStyle = grey(72); sg.beginPath(); sg.ellipse(x, ly, 2.6, 1.6, 0, 0, TAU); sg.fill();
+      hg.fillStyle = grey(96); hg.beginPath(); hg.ellipse(x, ly, 2.6, 1.6, 0, 0, TAU); hg.fill();
+    }
+  }
+  // Gill covers: a raised bony edge on each side of the head.
+  for (const cy of [0.25 * H, 0.75 * H]) {
+    const gx = S0 * W - 64, R = 64;
+    hg.lineWidth = 5; hg.strokeStyle = grey(170);
+    hg.beginPath(); hg.arc(gx, cy, R - 2, -1.15, 1.15); hg.stroke();
+    hg.lineWidth = 3; hg.strokeStyle = grey(96);
+    hg.beginPath(); hg.arc(gx, cy, R + 2.5, -1.15, 1.15); hg.stroke();
+    sg.lineWidth = 2.2; sg.strokeStyle = grey(80);
+    sg.beginPath(); sg.arc(gx, cy, R + 1.5, -1.15, 1.15); sg.stroke();
+    sg.lineWidth = 3; sg.strokeStyle = grey(160);
+    sg.beginPath(); sg.arc(gx, cy, R - 3, -1.15, 1.15); sg.stroke();
+  }
+  // Height -> tangent-space normals. Canvas y runs down while texture v runs up, and v wraps
+  // round the body.
+  const hd = hg.getImageData(0, 0, W, H).data, nc = document.createElement('canvas');
+  nc.width = W; nc.height = H;
+  const nctx = nc.getContext('2d'), img = nctx.createImageData(W, H), o = img.data, K = 0.028;
+  for (let y = 0; y < H; y++) {
+    const up = ((y + H - 1) % H) * W, dn = ((y + 1) % H) * W, row = y * W;
+    for (let x = 0; x < W; x++) {
+      const xl = Math.max(x - 1, 0), xr = Math.min(x + 1, W - 1);
+      const nx = -(hd[(row + xr) * 4] - hd[(row + xl) * 4]) * K, ny = (hd[(dn + x) * 4] - hd[(up + x) * 4]) * K;
+      const inv = 1 / Math.hypot(nx, ny, 1), i = (row + x) * 4;
+      o[i] = (nx * inv * 0.5 + 0.5) * 255; o[i + 1] = (ny * inv * 0.5 + 0.5) * 255; o[i + 2] = (inv * 0.5 + 0.5) * 255; o[i + 3] = 255;
+    }
+  }
+  nctx.putImageData(img, 0, 0);
+  const normalMap = new THREE.CanvasTexture(nc);
+  normalMap.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return { shade, normalMap };
+})();
+
+function koiColorTexture(v, seed) {
+  const W = KOI_TEX_W, H = KOI_TEX_H, c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
   // Canvas x is distance from the snout; canvas y wraps the body: belly, flank, back, flank, belly.
   const gr = g.createLinearGradient(0, 0, 0, H);
   gr.addColorStop(0, rgba(v.belly, 1));
   gr.addColorStop(0.17, rgba(v.side, 1));
   gr.addColorStop(0.4, rgba(v.back, 1));
-  gr.addColorStop(0.5, rgba(v.back, 1));
   gr.addColorStop(0.6, rgba(v.back, 1));
   gr.addColorStop(0.83, rgba(v.side, 1));
   gr.addColorStop(1, rgba(v.belly, 1));
   g.fillStyle = gr;
   g.fillRect(0, 0, W, H);
-  // A bright, scaleless head.
+  // A bright head without scales.
   const hg = g.createLinearGradient(0, 0, 0.3 * W, 0);
   hg.addColorStop(0, rgba(v.head, 0.9));
   hg.addColorStop(0.8, rgba(v.head, 0.55));
@@ -815,75 +995,48 @@ function koiTextures(v, seed) {
       }
     }
   }
-  // Dark line along the spine.
+  // A darker line along the spine.
   const sg = g.createLinearGradient(0, H * 0.44, 0, H * 0.56);
-  sg.addColorStop(0, 'rgba(90,45,0,0)');
+  sg.addColorStop(0, 'rgba(110,55,0,0)');
   sg.addColorStop(0.5, 'rgba(110,55,0,0.16)');
-  sg.addColorStop(1, 'rgba(90,45,0,0)');
+  sg.addColorStop(1, 'rgba(110,55,0,0)');
   g.fillStyle = sg;
   g.fillRect(0.25 * W, H * 0.44, 0.75 * W, H * 0.12);
-
-  b.fillStyle = 'rgb(160,160,160)';
-  b.fillRect(0, 0, W, H);
-  // Scales: each one a soft metallic glint with a faint rim towards the tail, every one a
-  // little brighter or duller than its neighbours, fading out on the belly.
-  const sx = 12, sy = 10, R = 6, sr = mulberry32(seed * 7 + 3);
-  for (let col = 0, x = W * 0.985; x > W * 0.27; col++, x -= sx) {
-    for (let y = col % 2 ? sy / 2 : 0; y < H + sy; y += sy) {
-      const vv = y / H, vis = smoothstep(0.06, 0.3, Math.min(vv, 1 - vv)) * smoothstep(0.27, 0.34, x / W);
-      const glint = g.createRadialGradient(x - R * 0.9, y, 0, x - R * 0.9, y, R * 1.1);
-      glint.addColorStop(0, `rgba(255,248,215,${(vis * (0.08 + 0.2 * sr())).toFixed(3)})`);
-      glint.addColorStop(1, 'rgba(255,248,215,0)');
-      g.fillStyle = glint;
-      g.fillRect(x - R * 2.1, y - R * 1.2, R * 2.4, R * 2.4);
-      g.lineWidth = 0.9;
-      g.strokeStyle = `rgba(120,64,0,${(0.12 * vis).toFixed(3)})`;
-      g.beginPath(); g.arc(x - R, y, R, -0.8, 0.8); g.stroke();
-      b.lineWidth = 1.2;
-      b.strokeStyle = `rgba(60,60,60,${(0.5 * vis).toFixed(3)})`;
-      b.beginPath(); b.arc(x - R, y, R, -0.8, 0.8); b.stroke();
-    }
-  }
-  // Gill covers on both flanks.
-  for (const cy of [0.25 * H, 0.75 * H]) {
-    g.lineWidth = 2.2;
-    g.strokeStyle = 'rgba(120,60,0,0.38)';
-    g.beginPath(); g.arc(0.27 * W - 34, cy, 34, -1.15, 1.15); g.stroke();
-    b.lineWidth = 3;
-    b.strokeStyle = 'rgba(30,30,30,0.9)';
-    b.beginPath(); b.arc(0.27 * W - 34, cy, 34, -1.15, 1.15); b.stroke();
-  }
-  const map = new THREE.CanvasTexture(color);
+  // Lay the scale shading over the colour: mid grey leaves it unchanged.
+  g.globalCompositeOperation = 'overlay';
+  g.globalAlpha = 0.9;
+  g.drawImage(koiScales.shade, 0, 0);
+  const map = new THREE.CanvasTexture(c);
   map.colorSpace = THREE.SRGBColorSpace;
-  map.anisotropy = 4;
-  return { map, bump: new THREE.CanvasTexture(bump) };
+  map.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return map;
 }
-function finTexture(hex) {
-  const S = 128, c = document.createElement('canvas');
-  c.width = c.height = S;
+// One fin ray per texture tile: the ray runs up the tile edge (u = whole numbers), thick at the
+// root, jointed into segments and forked towards the tip like real soft rays.
+function finTexture(v) {
+  const W = 64, H = 256, c = document.createElement('canvas');
+  c.width = W; c.height = H;
   const g = c.getContext('2d');
-  // uv.y = 0 (fin root) is the bottom of the canvas.
-  const gr = g.createLinearGradient(0, S, 0, 0);
-  gr.addColorStop(0, rgba(hex, 0.92));
-  gr.addColorStop(0.55, rgba(hex, 0.66));
-  gr.addColorStop(1, 'rgba(255,248,225,0.3)');
+  const gr = g.createLinearGradient(0, H, 0, 0); // canvas bottom = fin root
+  gr.addColorStop(0, rgba(v.fin, 0.82));
+  gr.addColorStop(0.55, rgba(v.fin, 0.56));
+  gr.addColorStop(1, 'rgba(255,248,225,0.26)');
   g.fillStyle = gr;
-  g.fillRect(0, 0, S, S);
-  const N = 14;
-  for (let i = 0; i < N; i++) {
-    const x = ((i + 0.5) / N) * S, rg = g.createLinearGradient(0, S, 0, 0);
-    rg.addColorStop(0, rgba(hex, 0.95));
-    rg.addColorStop(1, 'rgba(255,240,200,0.35)');
-    g.strokeStyle = rg;
-    g.lineWidth = 1.7;
-    g.beginPath(); g.moveTo(x, S); g.lineTo(x, 0); g.stroke();
+  g.fillRect(0, 0, W, H);
+  for (let y = 0; y < H; y++) {
+    const r = 1 - y / H, half = W * (0.1 - 0.055 * r), fork = r > 0.6 ? ((r - 0.6) / 0.4) * W * 0.16 : 0;
+    const joint = r > 0.28 && y % 10 < 1.5;
+    g.fillStyle = rgba(v.back, joint ? 0.25 : 0.95 - 0.55 * r);
+    for (const cx of fork ? [fork, W - fork] : [0, W]) g.fillRect(cx - half, y, half * 2, 1);
   }
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = THREE.RepeatWrapping;
   return t;
 }
 
 const fish = [];
+const koiBodyMaterials = [];
 function pickTarget(f) {
   if (rng() < 0.35) {
     const o = fish[(rng() * fish.length) | 0]; // drift after another koi, loosely
@@ -917,21 +1070,22 @@ function setState(f, state) {
 
 {
   const materials = KOI_VARIANTS.map((v, i) => {
-    const { map, bump } = koiTextures(v, 101 + i);
+    // Metallic scales under a smooth clearcoat: the slime layer every fish carries.
     const body = new THREE.MeshPhysicalMaterial({
-      map, bumpMap: bump, bumpScale: 0.5, metalness: 0.55, roughness: 0.32,
-      clearcoat: 0.5, clearcoatRoughness: 0.3, envMap: envTex, envMapIntensity: 1.0,
+      map: koiColorTexture(v, 101 + i), normalMap: koiScales.normalMap, normalScale: new THREE.Vector2(0.9, 0.9),
+      metalness: 0.55, roughness: 0.3, clearcoat: 0.6, clearcoatRoughness: 0.15, envMap: envTex, envMapIntensity: 1.0,
     });
     addCaustics(body, 0.7);
+    koiBodyMaterials.push(body);
     const fin = new THREE.MeshStandardMaterial({
-      map: finTexture(v.fin), transparent: true, side: THREE.DoubleSide, depthWrite: false,
+      map: finTexture(v), transparent: true, side: THREE.DoubleSide, depthWrite: false,
       roughness: 0.45, metalness: 0.15, envMap: envTex, envMapIntensity: 0.5,
     });
     const iris = new THREE.MeshStandardMaterial({ color: v.head, metalness: 0.7, roughness: 0.3, envMap: envTex });
     return { body, fin, iris };
   });
   const plan = [0, 1, 3, 2, 0, 3, 1];
-  plan.forEach((vi, i) => {
+  plan.forEach((vi) => {
     const mat = materials[vi];
     const group = new THREE.Group();
     group.rotation.order = 'YXZ';
@@ -943,16 +1097,16 @@ function setState(f, state) {
     }
     const body = new THREE.SkinnedMesh(koiBodyGeo, mat.body);
     const fins = new THREE.SkinnedMesh(koiMedianFinGeo, mat.fin);
+    const skel = new THREE.SkinnedMesh(koiBoneGeo, koiBoneMat);
+    skel.visible = false;
     body.add(bones[0]);
-    group.add(body, fins);
+    group.add(body, fins, skel);
     group.updateMatrixWorld(true);
     const skeleton = new THREE.Skeleton(bones);
-    body.bind(skeleton);
-    fins.bind(skeleton);
+    for (const m of [body, fins, skel]) { m.bind(skeleton); m.frustumCulled = false; }
     body.castShadow = true;
-    body.frustumCulled = fins.frustumCulled = false;
 
-    // Head details ride on the head bone.
+    // Head details ride on the skull bone.
     bones[0].add(new THREE.Mesh(barbelGeo, mat.body));
     for (const sx of [-1, 1]) {
       const p = eyePos.clone().setX(eyePos.x * sx);
@@ -965,8 +1119,8 @@ function setState(f, state) {
       bones[0].add(iris, eye);
     }
     // Paired fins on pivots so they can fold, spread and scull.
-    const pivot = (bone, s, side, geo, inset, drop) => {
-      const [w, , bot] = koiSection(s);
+    const pivot = (s, side, geo, inset, drop) => {
+      const [w, , bot] = koiSection(s), bone = boneAt(s);
       const o = new THREE.Object3D();
       o.rotation.order = 'YXZ';
       o.position.set(side * w * inset, bot * drop, -(s - BONE_S[bone]));
@@ -978,9 +1132,9 @@ function setState(f, state) {
     group.scale.setScalar(scale);
     const th = rng() * TAU, d = rand(0, 0.45) * pondR(th);
     const f = {
-      group, bones, scale, seed: rng() * 100,
-      pecR: pivot(0, 0.29, 1, pectoralGeo[0], 0.72, 0.62), pecL: pivot(0, 0.29, -1, pectoralGeo[1], 0.72, 0.62),
-      pelR: pivot(2, 0.5, 1, pelvicGeo[0], 0.42, 0.88), pelL: pivot(2, 0.5, -1, pelvicGeo[1], 0.42, 0.88),
+      group, bones, skel, scale, seed: rng() * 100,
+      pecR: pivot(0.29, 1, pectoralGeo[0], 0.72, 0.62), pecL: pivot(0.29, -1, pectoralGeo[1], 0.72, 0.62),
+      pelR: pivot(0.5, 1, pelvicGeo[0], 0.42, 0.88), pelL: pivot(0.5, -1, pelvicGeo[1], 0.42, 0.88),
       x: Math.cos(th) * d, z: Math.sin(th) * d, y: rand(-0.8, -0.35), heading: rng() * TAU,
       speed: 0.2 * scale, turnRate: 0, bend: 0, amp: 0.05, freq: 0.6, phase: rng() * TAU, pecPhase: rng() * TAU,
       pitch: 0, tx: 0, tz: 0, ty: -0.5, cruise: 0.3, state: 'swim', stateT: 0, kissed: false,
@@ -992,8 +1146,20 @@ function setState(f, state) {
   });
 }
 
-// Lateral offset of the spine at distance s from the snout: a travelling wave whose amplitude
-// grows quadratically towards the tail, plus a curve into the current turn.
+// See-through view: fade the bodies and show the skeletons inside.
+function setXray(on) {
+  for (const m of koiBodyMaterials) {
+    m.transparent = on;
+    m.opacity = on ? 0.22 : 1;
+    m.depthWrite = !on;
+    m.needsUpdate = true;
+  }
+  for (const f of fish) f.skel.visible = on;
+}
+
+// Where the spine wants to be at distance s from the snout: a travelling wave whose amplitude
+// grows quadratically towards the tail, plus a curve into the current turn. Each joint then
+// bends towards that shape only as far as its vertebrae allow.
 const spineX = new Array(BONE_S.length + 1);
 function poseKoi(f) {
   const nb = BONE_S.length, sAt = (i) => (i < nb ? BONE_S[i] : TAIL_TIP);
@@ -1004,9 +1170,10 @@ function poseKoi(f) {
   }
   let prev = 0;
   for (let i = 0; i < nb; i++) {
-    const phi = -Math.atan((spineX[i + 1] - spineX[i]) / (sAt(i + 1) - sAt(i)));
-    f.bones[i].rotation.y = phi - prev;
-    prev = phi;
+    const want = -Math.atan((spineX[i + 1] - spineX[i]) / (sAt(i + 1) - sAt(i)));
+    const local = clamp(want - prev, -JOINT_LIMIT[i], JOINT_LIMIT[i]);
+    f.bones[i].rotation.y = local;
+    prev += local;
   }
 }
 
@@ -1146,7 +1313,7 @@ const controls = new OrbitControls(camera, canvas);
 controls.target.set(0, -0.2, 0);
 Object.assign(controls, {
   enableDamping: true, dampingFactor: 0.06, enablePan: false,
-  minDistance: 4, maxDistance: 12.5, minPolarAngle: 0.12, maxPolarAngle: 1.32,
+  minDistance: 2.5, maxDistance: 12.5, minPolarAngle: 0.12, maxPolarAngle: 1.32,
   autoRotate: !reduceMotion, autoRotateSpeed: 0.35,
 });
 let idleTimer;
@@ -1166,6 +1333,14 @@ canvas.addEventListener('pointerup', (e) => {
     if (raycaster.ray.intersectPlane(waterPlane, hit) && pondS(hit.x, hit.z) < 0.85) feed(hit.x, hit.z);
   }
   down = null;
+});
+
+const xrayBtn = document.getElementById('xray');
+xrayBtn.addEventListener('click', () => {
+  const on = xrayBtn.getAttribute('aria-pressed') !== 'true';
+  xrayBtn.setAttribute('aria-pressed', String(on));
+  xrayBtn.textContent = on ? '隐藏鱼骨' : '透视鱼骨';
+  setXray(on);
 });
 
 function resize() {
